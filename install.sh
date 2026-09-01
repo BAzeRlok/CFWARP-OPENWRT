@@ -4,9 +4,8 @@ set -eu
 umask 077
 
 REPOSITORY="BAzeRlok/CFWARP-OPENWRT"
-RELEASE_TAG="v1.4.0"
+RELEASE_TAG="v1.4.1"
 RELEASE_URL="https://github.com/$REPOSITORY/releases/download/$RELEASE_TAG"
-USQUE_PACKAGE="warp-usque-2.0.1-r3.apk"
 LUCI_PACKAGE="luci-app-warp-1.4.0-r1.apk"
 I18N_PACKAGE="luci-i18n-warp-ru-0.260901.59252.apk"
 TRANSPORT="${WARP_TRANSPORT:-quic}"
@@ -49,7 +48,14 @@ case "$TRANSPORT" in
 esac
 
 ARCH=$(apk --print-arch 2>/dev/null | sed -n '1p')
-[ "$ARCH" = aarch64_cortex-a53 ] || die "для архитектуры $ARCH пока нет warp-usque; требуется aarch64_cortex-a53"
+case "$ARCH" in
+	aarch64|aarch64_cortex-a53)
+		USQUE_PACKAGE="warp-usque-2.0.1-r3-$ARCH.apk"
+		;;
+	*)
+		die "для архитектуры $ARCH пока нет warp-usque; поддерживаются aarch64 и aarch64_cortex-a53"
+		;;
+esac
 
 INSTALL_DIR=$(mktemp -d /tmp/cfwarp-install.XXXXXX) || die 'не удалось создать временный каталог'
 trap 'rm -rf "$INSTALL_DIR"' EXIT HUP INT TERM

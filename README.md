@@ -11,14 +11,15 @@ route или kill switch. Выбор трафика для интерфейса 
 
 ## Установка одной командой
 
-Установщик рассчитан на чистую OpenWrt 25.12.x с архитектурой
+Установщик рассчитан на чистую OpenWrt 25.12.x с архитектурой `aarch64` или
 `aarch64_cortex-a53`:
 
 ```sh
 wget -qO- https://raw.githubusercontent.com/BAzeRlok/CFWARP-OPENWRT/main/install.sh | sh
 ```
 
-Он скачивает APK из GitHub Release `v1.4.0`, проверяет SHA-256, устанавливает
+Он скачивает APK из GitHub Release `v1.4.1`, автоматически выбирает вариант
+backend по результату `apk --print-arch`, проверяет SHA-256, устанавливает
 пакеты и запускает регистрацию. По умолчанию используются QUIC и SNI
 `ozon.ru`. Для TCP/HTTP2:
 
@@ -69,13 +70,24 @@ Backend работает автономно и не читает конфигу�
 
 ## Ручная установка
 
-Скачайте четыре файла из GitHub Release `v1.4.0`: три APK и `SHA256SUMS`.
+Скачайте из GitHub Release `v1.4.1` файл `SHA256SUMS`, два LuCI-пакета и
+вариант `warp-usque`, соответствующий результату `apk --print-arch`.
 
 ```sh
-sha256sum -c SHA256SUMS
+ARCH="$(apk --print-arch)"
+USQUE_PACKAGE="warp-usque-2.0.1-r3-$ARCH.apk"
+for PACKAGE in \
+    "$USQUE_PACKAGE" \
+    luci-app-warp-1.4.0-r1.apk \
+    luci-i18n-warp-ru-0.260901.59252.apk
+do
+    EXPECTED="$(awk -v name="$PACKAGE" '$2 == name { print $1; exit }' SHA256SUMS)"
+    ACTUAL="$(sha256sum "$PACKAGE" | awk '{ print $1 }')"
+    [ -n "$EXPECTED" ] && [ "$ACTUAL" = "$EXPECTED" ] || exit 1
+done
 
 apk add --allow-untrusted \
-    ./warp-usque-2.0.1-r3.apk \
+    "./$USQUE_PACKAGE" \
     ./luci-app-warp-1.4.0-r1.apk \
     ./luci-i18n-warp-ru-0.260901.59252.apk
 

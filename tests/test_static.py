@@ -174,6 +174,12 @@ class PackageTests(unittest.TestCase):
         self.assertNotIn("firewall4", makefile)
         self.assertNotIn("pbr", makefile)
 
+    def test_installer_selects_supported_arm64_package(self):
+        installer = (ROOT / "install.sh").read_text(encoding="utf-8")
+        self.assertIn("aarch64|aarch64_cortex-a53)", installer)
+        self.assertIn('USQUE_PACKAGE="warp-usque-2.0.1-r3-$ARCH.apk"', installer)
+        self.assertIn('RELEASE_TAG="v1.4.1"', installer)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
