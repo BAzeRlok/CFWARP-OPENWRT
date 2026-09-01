@@ -1,0 +1,102 @@
+#!/bin/sh
+
+# Minimal adapter used only to remove the current usque device from Cloudflare.
+set -u
+umask 077
+
+API_BASE="${WARP_API_BASE:-https://api.cloudflareclient.com/v0a2483}"
+CLIENT_VERSION="a-6.81-2410012252.0"
+USER_AGENT="1.1.1.1/6.81"
+CURL_BIN="${WARP_CURL_BIN:-/usr/bin/curl}"
+JSONFILTER_BIN="${WARP_JSONFILTER_BIN:-/usr/bin/jsonfilter}"
+
+error_file=
+response_file=
+
+cleanup() {
+	[ -z "$error_file" ] || rm -f -- "$error_file"
+	[ -z "$response_file" ] || rm -f -- "$response_file"
+}
+trap cleanup EXIT HUP INT TERM
+
+fail() {
+	printf '%s\n' "$1" >&2
+	exit 1
+}
+
+valid_path() {
+	case "$1" in
+		*..*|*//*) return 1 ;;
+		/etc/warp/*|/tmp/warp-test/*) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+valid_token() {
+	[ -n "$1" ] && [ "${#1}" -le 4096 ] || return 1
+	case "$1" in *[!A-Za-z0-9._~+/=-]*) return 1 ;; esac
+}
+
+json_get() {
+	"$JSONFILTER_BIN" -i "$1" -e "$2" 2>/dev/null
+}
+
+classify_curl_error() {
+	case "$1" in
+		6) printf '%s\n' 'dns_error' ;;
+		7) printf '%s\n' 'connection_error' ;;
+		28) printf '%s\n' 'timeout' ;;
+		35|51|58|59|60|77|80|82|83|90|91) printf '%s\n' 'tls_error' ;;
+		*) printf '%s\n' 'network_error' ;;
+	esac
+}
+
+do_unregister() {
+	[ "$#" -eq 1 ] || fail 'invalid_arguments'
+	profile=$1
+	valid_path "$profile" || fail 'invalid_registration_path'
+	[ -f "$profile" ] || fail 'registration_missing'
+
+	device_id=$(json_get "$profile" '@.id')
+	token=$(json_get "$profile" '@.access_token')
+	printf '%s' "$device_id" | grep -Eq '^[A-Za-z0-9._-]{8,128}$' || fail 'invalid_registration'
+	valid_token "$token" || fail 'invalid_registration'
+
+	state_dir=${profile%/*}
+	error_file="$state_dir/.curl-error.$$"
+	response_file="$state_dir/.delete-response.$$"
+	http_code=$("$CURL_BIN" \
+		--silent --show-error \
+		--connect-timeout 10 --max-time 40 \
+		--tls-max 1.2 \
+		--header "User-Agent: $USER_AGENT" \
+		--header "CF-Client-Version: $CLIENT_VERSION" \
+		--header 'Accept: application/json; charset=UTF-8' \
+		--request DELETE \
+		--header "Authorization: Bearer $token" \
+		--output "$response_file" \
+		--write-out '%{http_code}' \
+		"$API_BASE/reg/$device_id" 2>"$error_file")
+	curl_rc=$?
+	if [ "$curl_rc" -ne 0 ]; then
+		classify_curl_error "$curl_rc" >&2
+		exit 1
+	fi
+	case "$http_code" in
+		200|202|204|404) ;;
+		429) fail 'api_rate_limited' ;;
+		4??) fail 'api_request_rejected' ;;
+		5??) fail 'api_unavailable' ;;
+		*) fail 'unexpected_http_status' ;;
+	esac
+}
+
+case "${1:-}" in
+	unregister)
+		shift
+		do_unregister "$@"
+		;;
+	*)
+		fail 'invalid_action'
+		;;
+esac

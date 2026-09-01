@@ -1,0 +1,604 @@
+#!/bin/sh
+
+set -u
+umask 077
+
+STATE_DIR="${WARP_STATE_DIR:-/etc/warp}"
+USQUE_CONFIG="$STATE_DIR/usque.json"
+BACKEND_LOG="$STATE_DIR/backend.log"
+DISABLED_FILE="$STATE_DIR/disabled"
+LAST_ERROR="$STATE_DIR/last_error"
+LOCK_DIR="${WARP_LOCK_DIR:-/var/lock/warp-manager.lock}"
+FORCE_START_FILE="${WARP_FORCE_START_FILE:-/tmp/warp-force-start}"
+
+UCI_BIN="${WARP_UCI_BIN:-/sbin/uci}"
+UBUS_BIN="${WARP_UBUS_BIN:-/bin/ubus}"
+JSONFILTER_BIN="${WARP_JSONFILTER_BIN:-/usr/bin/jsonfilter}"
+USQUE_BIN="${WARP_USQUE_BIN:-/usr/libexec/warp-usque}"
+API_BIN="${WARP_API_BIN:-/usr/libexec/warp-api}"
+IFUP_BIN="${WARP_IFUP_BIN:-/sbin/ifup}"
+IFDOWN_BIN="${WARP_IFDOWN_BIN:-/sbin/ifdown}"
+SERVICE_INIT="${WARP_SERVICE_INIT:-/etc/init.d/warp}"
+
+lock_held=0
+temp_batch=
+temp_export=
+temp_snapshot=
+temp_txn=
+temp_usque_config=
+temp_usque_pid=
+RUNTIME_START_ERROR=interface_up_failed
+
+cleanup() {
+	if [ -n "$temp_usque_pid" ]; then
+		kill -TERM "$temp_usque_pid" 2>/dev/null || true
+		wait "$temp_usque_pid" 2>/dev/null || true
+	fi
+	[ -z "$temp_batch" ] || rm -f -- "$temp_batch"
+	[ -z "$temp_export" ] || rm -f -- "$temp_export"
+	[ -z "$temp_snapshot" ] || rm -f -- "$temp_snapshot"
+	[ -z "$temp_txn" ] || rm -rf -- "$temp_txn"
+	[ -z "$temp_usque_config" ] || rm -f -- "$temp_usque_config"
+	rm -f -- "$FORCE_START_FILE" 2>/dev/null || true
+	if [ "$lock_held" -eq 1 ]; then
+		rm -rf -- "$LOCK_DIR"
+	fi
+}
+trap cleanup EXIT HUP INT TERM
+
+json_escape() {
+	printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/[[:cntrl:]]/ /g'
+}
+
+emit_error() {
+	code=$1
+	mkdir -p "$STATE_DIR" 2>/dev/null || true
+	chmod 700 "$STATE_DIR" 2>/dev/null || true
+	printf '%s\n' "$code" >"$LAST_ERROR" 2>/dev/null || true
+	chmod 600 "$LAST_ERROR" 2>/dev/null || true
+	printf '{"ok":false,"code":"%s"}\n' "$(json_escape "$code")"
+	exit 0
+}
+
+emit_success() {
+	code=$1
+	interface_name=${2:-}
+	rm -f -- "$LAST_ERROR" 2>/dev/null || true
+	printf '{"ok":true,"code":"%s","interface":"%s"}\n' \
+		"$(json_escape "$code")" "$(json_escape "$interface_name")"
+	exit 0
+}
+
+acquire_lock() {
+	lock_parent=${LOCK_DIR%/*}
+	[ "$lock_parent" = "$LOCK_DIR" ] || mkdir -p "$lock_parent" 2>/dev/null || emit_error 'lock_failed'
+	if mkdir "$LOCK_DIR" 2>/dev/null; then
+		lock_held=1
+		printf '%s\n' "$$" >"$LOCK_DIR/pid"
+		return
+	fi
+	old_pid=$(sed -n '1p' "$LOCK_DIR/pid" 2>/dev/null || true)
+	case "$old_pid" in
+		''|*[!0-9]*) ;;
+		*) kill -0 "$old_pid" 2>/dev/null && emit_error 'operation_in_progress' ;;
+	esac
+	rm -rf -- "$LOCK_DIR" 2>/dev/null || emit_error 'lock_failed'
+	mkdir "$LOCK_DIR" 2>/dev/null || emit_error 'operation_in_progress'
+	lock_held=1
+	printf '%s\n' "$$" >"$LOCK_DIR/pid"
+}
+
+require_dependencies() {
+	for path in "$UCI_BIN" "$UBUS_BIN" "$JSONFILTER_BIN" "$USQUE_BIN" "$API_BIN" "$IFUP_BIN" "$IFDOWN_BIN" "$SERVICE_INIT" /usr/bin/curl; do
+		[ -x "$path" ] || emit_error 'dependency_missing'
+	done
+	[ -r /etc/ssl/certs/ca-certificates.crt ] || [ -r /etc/ssl/cert.pem ] || emit_error 'ca_bundle_missing'
+	[ -c /dev/net/tun ] || emit_error 'tun_unavailable'
+}
+
+cfg_get() {
+	value=$($UCI_BIN -q get "warp.main.$1" 2>/dev/null || true)
+	[ -n "$value" ] && printf '%s\n' "$value" || printf '%s\n' "$2"
+}
+
+valid_uci_name() {
+	printf '%s' "$1" | grep -Eq '^[A-Za-z_][A-Za-z0-9_]{0,14}$'
+}
+
+valid_hostname() {
+	[ "${#1}" -le 253 ] || return 1
+	printf '%s' "$1" | grep -Eq '^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)*[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$'
+}
+
+valid_uint_range() {
+	printf '%s' "$1" | grep -Eq '^[0-9]+$' || return 1
+	[ "$1" -ge "$2" ] && [ "$1" -le "$3" ]
+}
+
+valid_flag() {
+	[ "$1" = 0 ] || [ "$1" = 1 ]
+}
+
+validate_settings() {
+	CFG_AUTO=$(cfg_get auto_start 1)
+	CFG_INTERFACE=$(cfg_get interface warp)
+	CFG_MTU=$(cfg_get mtu 1280)
+	CFG_KEEPALIVE=$(cfg_get keepalive 25)
+	CFG_IPV4=$(cfg_get ipv4 1)
+	CFG_IPV6=$(cfg_get ipv6 1)
+	CFG_MASQUE_TRANSPORT=$(cfg_get masque_transport quic)
+	CFG_MASQUE_SNI=$(cfg_get masque_sni ozon.ru)
+	CFG_ACTUAL=$(cfg_get actual_interface '')
+	CFG_BACKEND=$(cfg_get actual_backend '')
+
+	valid_flag "$CFG_AUTO" || emit_error 'invalid_auto_start'
+	valid_uci_name "$CFG_INTERFACE" || emit_error 'invalid_interface_name'
+	valid_uint_range "$CFG_MTU" 576 9000 || emit_error 'invalid_mtu'
+	valid_uint_range "$CFG_KEEPALIVE" 0 65535 || emit_error 'invalid_keepalive'
+	valid_flag "$CFG_IPV4" || emit_error 'invalid_ipv4_setting'
+	valid_flag "$CFG_IPV6" || emit_error 'invalid_ipv6_setting'
+	case "$CFG_MASQUE_TRANSPORT" in quic|http2) ;; *) emit_error 'invalid_masque_transport' ;; esac
+	[ -z "$CFG_MASQUE_SNI" ] || valid_hostname "$CFG_MASQUE_SNI" || emit_error 'invalid_masque_sni'
+	[ -z "$CFG_ACTUAL" ] || valid_uci_name "$CFG_ACTUAL" || emit_error 'invalid_managed_interface'
+	case "$CFG_BACKEND" in ''|usque_masque) ;; *) emit_error 'invalid_backend' ;; esac
+	[ "$CFG_IPV4" = 1 ] || [ "$CFG_IPV6" = 1 ] || emit_error 'no_address_family'
+}
+
+json_get() {
+	"$JSONFILTER_BIN" -i "$1" -e "$2" 2>/dev/null
+}
+
+is_ipv4_address() {
+	printf '%s\n' "$1" | awk -F/ '
+		NF < 1 || NF > 2 { exit 1 }
+		NF == 2 && ($2 !~ /^[0-9]+$/ || $2 > 32) { exit 1 }
+		{ n = split($1, a, "."); if (n != 4) exit 1;
+		  for (i = 1; i <= 4; i++) if (a[i] !~ /^[0-9]+$/ || a[i] > 255) exit 1 }
+	'
+}
+
+is_ipv6_address() {
+	address=${1%/*}
+	prefix=
+	case "$1" in */*) prefix=${1##*/} ;; esac
+	printf '%s' "$address" | grep -Eq '^[0-9A-Fa-f:]+$' || return 1
+	case "$address" in *:*) ;; *) return 1 ;; esac
+	[ -z "$prefix" ] || valid_uint_range "$prefix" 0 128
+}
+
+usque_profile_valid() {
+	profile=${1:-$USQUE_CONFIG}
+	[ -s "$profile" ] || return 1
+	USQUE_ID=$(json_get "$profile" '@.id')
+	USQUE_TOKEN=$(json_get "$profile" '@.access_token')
+	USQUE_PRIVATE_KEY=$(json_get "$profile" '@.private_key')
+	USQUE_ENDPOINT_V4=$(json_get "$profile" '@.endpoint_v4')
+	USQUE_ENDPOINT_PUBLIC=$(json_get "$profile" '@.endpoint_pub_key')
+	USQUE_IPV4=$(json_get "$profile" '@.ipv4')
+	USQUE_IPV6=$(json_get "$profile" '@.ipv6')
+
+	printf '%s' "$USQUE_ID" | grep -Eq '^[A-Za-z0-9._-]{8,128}$' || return 1
+	[ -n "$USQUE_TOKEN" ] && [ "${#USQUE_TOKEN}" -le 4096 ] || return 1
+	case "$USQUE_TOKEN" in *[!A-Za-z0-9._~+/=-]*) return 1 ;; esac
+	[ "${#USQUE_PRIVATE_KEY}" -ge 40 ] && [ "${#USQUE_PRIVATE_KEY}" -le 1024 ] || return 1
+	case "$USQUE_PRIVATE_KEY" in *[!A-Za-z0-9+/=]*) return 1 ;; esac
+	is_ipv4_address "$USQUE_ENDPOINT_V4" || return 1
+	printf '%s\n' "$USQUE_ENDPOINT_PUBLIC" | grep -q -- 'BEGIN PUBLIC KEY' || return 1
+	[ "${#USQUE_ENDPOINT_PUBLIC}" -le 4096 ] || return 1
+	[ -z "$USQUE_IPV4" ] || is_ipv4_address "$USQUE_IPV4" || return 1
+	[ -z "$USQUE_IPV6" ] || is_ipv6_address "$USQUE_IPV6" || return 1
+	[ -n "$USQUE_IPV4" ] || [ -n "$USQUE_IPV6" ] || return 1
+}
+
+check_system_time() {
+	now=$(date +%s 2>/dev/null || printf '0')
+	case "$now" in ''|*[!0-9]*) emit_error 'system_time_invalid' ;; esac
+	[ "$now" -ge 1704067200 ] || emit_error 'system_time_invalid'
+}
+
+ensure_usque_profile() {
+	if [ -e "$USQUE_CONFIG" ]; then
+		usque_profile_valid || emit_error 'invalid_usque_profile'
+		return
+	fi
+	temp_usque_config="$STATE_DIR/.usque.$$"
+	: >"$BACKEND_LOG" || emit_error 'state_write_failed'
+	chmod 600 "$BACKEND_LOG" || emit_error 'state_write_failed'
+	"$USQUE_BIN" --config "$temp_usque_config" register --accept-tos --name OpenWrt >"$BACKEND_LOG" 2>&1 &
+	temp_usque_pid=$!
+	profile_ready=0
+	wait_count=0
+	while [ "$wait_count" -lt 75 ]; do
+		if usque_profile_valid "$temp_usque_config"; then
+			profile_ready=1
+			break
+		fi
+		if ! kill -0 "$temp_usque_pid" 2>/dev/null; then
+			wait "$temp_usque_pid" 2>/dev/null || true
+			temp_usque_pid=
+			break
+		fi
+		sleep 1
+		wait_count=$((wait_count + 1))
+	done
+	if [ -n "$temp_usque_pid" ]; then
+		kill -TERM "$temp_usque_pid" 2>/dev/null || true
+		wait "$temp_usque_pid" 2>/dev/null || true
+		temp_usque_pid=
+	fi
+	[ "$profile_ready" -eq 1 ] || usque_profile_valid "$temp_usque_config" || emit_error 'masque_registration_failed'
+	chmod 600 "$temp_usque_config" || emit_error 'state_write_failed'
+	mv -f -- "$temp_usque_config" "$USQUE_CONFIG" || emit_error 'state_write_failed'
+	temp_usque_config=
+	chmod 600 "$USQUE_CONFIG" || emit_error 'state_write_failed'
+	usque_profile_valid || emit_error 'invalid_usque_profile'
+}
+
+select_address_families() {
+	USE_IPV4=0
+	USE_IPV6=0
+	[ "$CFG_IPV4" = 1 ] && [ -n "$USQUE_IPV4" ] && USE_IPV4=1
+	[ "$CFG_IPV6" = 1 ] && [ -n "$USQUE_IPV6" ] && [ -r /proc/sys/net/ipv6/conf/all/disable_ipv6 ] && \
+		[ "$(sed -n '1p' /proc/sys/net/ipv6/conf/all/disable_ipv6)" != 1 ] && USE_IPV6=1
+	[ "$USE_IPV4" = 1 ] || [ "$USE_IPV6" = 1 ] || emit_error 'no_registered_address_for_enabled_family'
+}
+
+network_section_exists() {
+	$UCI_BIN -q get "network.$1" >/dev/null 2>&1
+}
+
+physical_interface_exists() {
+	[ -e "/sys/class/net/$1" ]
+}
+
+interface_owned() {
+	[ "$($UCI_BIN -q get "network.$1" 2>/dev/null || true)" = interface ] &&
+	[ "$($UCI_BIN -q get "network.$1.warp_managed" 2>/dev/null || true)" = luci-app-warp ]
+}
+
+choose_interface() {
+	if [ -n "$CFG_ACTUAL" ] && interface_owned "$CFG_ACTUAL"; then
+		ACTUAL_INTERFACE=$CFG_ACTUAL
+		return
+	fi
+	candidate=$CFG_INTERFACE
+	if { ! network_section_exists "$candidate" && ! physical_interface_exists "$candidate"; } || interface_owned "$candidate"; then
+		ACTUAL_INTERFACE=$candidate
+		return
+	fi
+	for candidate in cfwarp cfwarp1 cfwarp2 cfwarp3 cfwarp4 cfwarp5 cfwarp6 cfwarp7 cfwarp8 cfwarp9; do
+		if { ! network_section_exists "$candidate" && ! physical_interface_exists "$candidate"; } || interface_owned "$candidate"; then
+			ACTUAL_INTERFACE=$candidate
+			return
+		fi
+	done
+	emit_error 'no_safe_interface_name'
+}
+
+snapshot_managed_section() {
+	temp_snapshot="$STATE_DIR/.network-snapshot.$$"
+	: >"$temp_snapshot"
+	chmod 600 "$temp_snapshot" || return 1
+	interface_owned "$ACTUAL_INTERFACE" || return 0
+	temp_export="$STATE_DIR/.network-export.$$"
+	$UCI_BIN -q export network >"$temp_export" 2>/dev/null || return 1
+	chmod 600 "$temp_export" || return 1
+	awk -v wanted="$ACTUAL_INTERFACE" '
+		$1 == "config" {
+			name = $3
+			gsub(/\047/, "", name)
+			keep = (name == wanted)
+		}
+		keep { print }
+	' "$temp_export" >"$temp_snapshot"
+	rc=$?
+	rm -f -- "$temp_export"
+	temp_export=
+	return "$rc"
+}
+
+restore_snapshot() {
+	rollback_dir="$STATE_DIR/.rollback.$$"
+	mkdir "$rollback_dir" 2>/dev/null || return 1
+	chmod 700 "$rollback_dir"
+	interface_owned "$ACTUAL_INTERFACE" && \
+		printf 'delete network.%s\n' "$ACTUAL_INTERFACE" | $UCI_BIN -q -t "$rollback_dir" batch >/dev/null 2>&1
+	if [ -s "$temp_snapshot" ]; then
+		$UCI_BIN -q -t "$rollback_dir" -m import network <"$temp_snapshot" >/dev/null 2>&1 || {
+			rm -rf -- "$rollback_dir"
+			return 1
+		}
+	fi
+	$UCI_BIN -q -t "$rollback_dir" commit network >/dev/null 2>&1
+	rc=$?
+	rm -rf -- "$rollback_dir"
+	return "$rc"
+}
+
+save_actual_state() {
+	names_dir="$STATE_DIR/.names.$$"
+	mkdir "$names_dir" 2>/dev/null || return 1
+	chmod 700 "$names_dir"
+	{
+		printf "set warp.main.actual_interface='%s'\n" "$ACTUAL_INTERFACE"
+		printf "set warp.main.actual_backend='usque_masque'\n"
+	} | $UCI_BIN -q -t "$names_dir" batch >/dev/null 2>&1 || {
+		rm -rf -- "$names_dir"
+		return 1
+	}
+	$UCI_BIN -q -t "$names_dir" commit warp >/dev/null 2>&1
+	rc=$?
+	rm -rf -- "$names_dir"
+	return "$rc"
+}
+
+restore_actual_state() {
+	names_dir="$STATE_DIR/.names-rollback.$$"
+	mkdir "$names_dir" 2>/dev/null || return 1
+	chmod 700 "$names_dir"
+	{
+		printf "set warp.main.actual_interface='%s'\n" "$CFG_ACTUAL"
+		printf "set warp.main.actual_backend='%s'\n" "$CFG_BACKEND"
+	} | $UCI_BIN -q -t "$names_dir" batch >/dev/null 2>&1 || true
+	$UCI_BIN -q -t "$names_dir" commit warp >/dev/null 2>&1
+	rc=$?
+	rm -rf -- "$names_dir"
+	return "$rc"
+}
+
+apply_configuration() {
+	choose_interface
+	ensure_usque_profile
+	select_address_families
+	snapshot_managed_section || emit_error 'network_snapshot_failed'
+	[ -z "$CFG_ACTUAL" ] || $IFDOWN_BIN "$CFG_ACTUAL" >/dev/null 2>&1 || true
+
+	temp_txn="$STATE_DIR/.uci.$$"
+	temp_batch="$STATE_DIR/.network-batch.$$"
+	mkdir "$temp_txn" 2>/dev/null || emit_error 'uci_stage_failed'
+	chmod 700 "$temp_txn"
+	: >"$temp_batch"
+	chmod 600 "$temp_batch"
+	interface_owned "$ACTUAL_INTERFACE" && printf 'delete network.%s\n' "$ACTUAL_INTERFACE" >>"$temp_batch"
+	{
+		printf 'set network.%s=interface\n' "$ACTUAL_INTERFACE"
+		printf "set network.%s.proto='none'\n" "$ACTUAL_INTERFACE"
+		printf "set network.%s.device='%s'\n" "$ACTUAL_INTERFACE" "$ACTUAL_INTERFACE"
+		printf "set network.%s.auto='%s'\n" "$ACTUAL_INTERFACE" "$CFG_AUTO"
+		printf "set network.%s.defaultroute='0'\n" "$ACTUAL_INTERFACE"
+		printf "set network.%s.peerdns='0'\n" "$ACTUAL_INTERFACE"
+		printf "set network.%s.delegate='0'\n" "$ACTUAL_INTERFACE"
+		printf "set network.%s.warp_backend='usque_masque'\n" "$ACTUAL_INTERFACE"
+		printf "set network.%s.warp_managed='luci-app-warp'\n" "$ACTUAL_INTERFACE"
+	} >>"$temp_batch"
+
+	$UCI_BIN -q -t "$temp_txn" batch <"$temp_batch" >/dev/null 2>&1 || emit_error 'uci_validation_failed'
+	$UCI_BIN -q -t "$temp_txn" changes network >/dev/null 2>&1 || emit_error 'uci_validation_failed'
+	$UCI_BIN -q -t "$temp_txn" commit network >/dev/null 2>&1 || emit_error 'uci_commit_failed'
+	if ! save_actual_state; then
+		restore_snapshot || emit_error 'rollback_failed'
+		restore_actual_state || emit_error 'rollback_failed'
+		emit_error 'settings_commit_failed'
+	fi
+	if ! $UBUS_BIN call network reload '{}' >/dev/null 2>&1; then
+		restore_snapshot || emit_error 'rollback_failed'
+		restore_actual_state || emit_error 'rollback_failed'
+		$UBUS_BIN call network reload '{}' >/dev/null 2>&1 || true
+		emit_error 'network_reload_failed'
+	fi
+}
+
+set_interface_auto() {
+	name=$1
+	value=$2
+	interface_owned "$name" || emit_error 'managed_interface_missing'
+	auto_dir="$STATE_DIR/.auto.$$"
+	mkdir "$auto_dir" 2>/dev/null || emit_error 'uci_stage_failed'
+	chmod 700 "$auto_dir"
+	printf "set network.%s.auto='%s'\n" "$name" "$value" | $UCI_BIN -q -t "$auto_dir" batch >/dev/null 2>&1 || {
+		rm -rf -- "$auto_dir"
+		emit_error 'uci_validation_failed'
+	}
+	$UCI_BIN -q -t "$auto_dir" commit network >/dev/null 2>&1 || {
+		rm -rf -- "$auto_dir"
+		emit_error 'uci_commit_failed'
+	}
+	rm -rf -- "$auto_dir"
+}
+
+runtime_stop() {
+	"$SERVICE_INIT" stop >/dev/null 2>&1 || true
+}
+
+runtime_restart_service() {
+	: >"$FORCE_START_FILE" || return 1
+	"$SERVICE_INIT" restart >/dev/null 2>&1 || {
+		rm -f -- "$FORCE_START_FILE"
+		return 1
+	}
+	rm -f -- "$FORCE_START_FILE"
+}
+
+runtime_start() {
+	RUNTIME_START_ERROR=interface_up_failed
+	rm -f -- "$DISABLED_FILE"
+	if ! runtime_restart_service; then
+		RUNTIME_START_ERROR=backend_start_failed
+		return 1
+	fi
+	wait_count=0
+	while [ "$wait_count" -lt 75 ]; do
+		[ -r "/sys/class/net/$ACTUAL_INTERFACE/tun_flags" ] && break
+		sleep 1
+		wait_count=$((wait_count + 1))
+	done
+	if [ ! -r "/sys/class/net/$ACTUAL_INTERFACE/tun_flags" ]; then
+		RUNTIME_START_ERROR=tunnel_start_timeout
+		return 1
+	fi
+	if ! $UBUS_BIN call network reload '{}' >/dev/null 2>&1; then
+		RUNTIME_START_ERROR=network_reload_failed
+		return 1
+	fi
+	if ! $IFUP_BIN "$ACTUAL_INTERFACE" >/dev/null 2>&1; then
+		RUNTIME_START_ERROR=interface_up_failed
+		return 1
+	fi
+}
+
+rollback_configuration() {
+	runtime_stop
+	restore_snapshot || return 1
+	restore_actual_state || return 1
+	$UBUS_BIN call network reload '{}' >/dev/null 2>&1 || return 1
+	if [ -n "$CFG_ACTUAL" ] && interface_owned "$CFG_ACTUAL"; then
+		$IFUP_BIN "$CFG_ACTUAL" >/dev/null 2>&1 || true
+	fi
+	if [ "$CFG_BACKEND" = usque_masque ] && [ -s "$USQUE_CONFIG" ]; then
+		runtime_restart_service || return 1
+	fi
+}
+
+remove_managed_network() {
+	name=$1
+	remove_dir="$STATE_DIR/.remove.$$"
+	mkdir "$remove_dir" 2>/dev/null || emit_error 'uci_stage_failed'
+	chmod 700 "$remove_dir"
+	interface_owned "$name" && printf 'delete network.%s\n' "$name" | \
+		$UCI_BIN -q -t "$remove_dir" batch >/dev/null 2>&1 || true
+	$UCI_BIN -q -t "$remove_dir" commit network >/dev/null 2>&1 || {
+		rm -rf -- "$remove_dir"
+		emit_error 'uci_commit_failed'
+	}
+	rm -rf -- "$remove_dir"
+}
+
+clear_actual_state() {
+	clear_dir="$STATE_DIR/.clear-names.$$"
+	mkdir "$clear_dir" 2>/dev/null || emit_error 'uci_stage_failed'
+	chmod 700 "$clear_dir"
+	{
+		printf "set warp.main.actual_interface=''\n"
+		printf "set warp.main.actual_backend=''\n"
+	} | $UCI_BIN -q -t "$clear_dir" batch >/dev/null 2>&1 || true
+	$UCI_BIN -q -t "$clear_dir" commit warp >/dev/null 2>&1 || {
+		rm -rf -- "$clear_dir"
+		emit_error 'settings_commit_failed'
+	}
+	rm -rf -- "$clear_dir"
+}
+
+connect_tunnel() {
+	success_code=$1
+	require_dependencies
+	validate_settings
+	mkdir -p "$STATE_DIR" 2>/dev/null || emit_error 'state_directory_failed'
+	chmod 700 "$STATE_DIR" || emit_error 'state_directory_failed'
+	check_system_time
+	runtime_stop
+	apply_configuration
+	if ! runtime_start; then
+		rollback_configuration || emit_error 'rollback_failed'
+		emit_error "$RUNTIME_START_ERROR"
+	fi
+	emit_success "$success_code" "$ACTUAL_INTERFACE"
+}
+
+do_register() {
+	acquire_lock
+	connect_tunnel 'connected'
+}
+
+do_enable() {
+	acquire_lock
+	connect_tunnel 'enabled'
+}
+
+do_reconnect() {
+	acquire_lock
+	connect_tunnel 'reconnected'
+}
+
+do_disable() {
+	acquire_lock
+	validate_settings
+	[ -n "$CFG_ACTUAL" ] && interface_owned "$CFG_ACTUAL" || emit_error 'managed_interface_missing'
+	set_interface_auto "$CFG_ACTUAL" 0
+	$IFDOWN_BIN "$CFG_ACTUAL" >/dev/null 2>&1 || true
+	mkdir -p "$STATE_DIR" 2>/dev/null || emit_error 'state_directory_failed'
+	: >"$DISABLED_FILE"
+	chmod 600 "$DISABLED_FILE"
+	runtime_stop
+	emit_success 'disabled' "$CFG_ACTUAL"
+}
+
+do_unregister() {
+	acquire_lock
+	require_dependencies
+	validate_settings
+	if [ -e "$USQUE_CONFIG" ]; then
+		usque_profile_valid || emit_error 'invalid_usque_profile'
+		api_error=$($API_BIN unregister "$USQUE_CONFIG" 2>&1 >/dev/null)
+		api_rc=$?
+		[ "$api_rc" -eq 0 ] || emit_error "${api_error:-unregister_failed}"
+	fi
+	runtime_stop
+	if [ -n "$CFG_ACTUAL" ] && interface_owned "$CFG_ACTUAL"; then
+		$IFDOWN_BIN "$CFG_ACTUAL" >/dev/null 2>&1 || true
+	fi
+	remove_managed_network "$CFG_ACTUAL"
+	clear_actual_state
+	$UBUS_BIN call network reload '{}' >/dev/null 2>&1 || emit_error 'network_reload_failed'
+	rm -f -- "$USQUE_CONFIG" "$BACKEND_LOG" "$DISABLED_FILE" "$LAST_ERROR"
+	emit_success 'unregistered' ''
+}
+
+do_status() {
+	validate_settings
+	state=not_configured
+	registered=false
+	managed=false
+	up=false
+	error_code=
+
+	if [ -d "$LOCK_DIR" ]; then
+		state=registering
+	elif [ -e "$USQUE_CONFIG" ]; then
+		if usque_profile_valid; then
+			registered=true
+			if [ -n "$CFG_ACTUAL" ] && interface_owned "$CFG_ACTUAL"; then
+				managed=true
+				if [ -e "$DISABLED_FILE" ]; then
+					state=disabled
+				elif [ -r "/sys/class/net/$CFG_ACTUAL/tun_flags" ]; then
+					up=true
+					state=interface_up
+				else
+					state=interface_created
+				fi
+			else
+				state=interface_created
+			fi
+		else
+			state=error
+			error_code=invalid_usque_profile
+		fi
+	fi
+	if [ -s "$LAST_ERROR" ]; then
+		error_code=$(sed -n '1p' "$LAST_ERROR")
+		[ "$state" = not_configured ] || [ "$state" = registering ] || state=error
+	fi
+	printf '{"ok":true,"state":"%s","interface":"%s","backend":"%s","registered":%s,"managed":%s,"up":%s,"error_code":"%s"}\n' \
+		"$(json_escape "$state")" "$(json_escape "$CFG_ACTUAL")" "$(json_escape "$CFG_BACKEND")" \
+		"$registered" "$managed" "$up" "$(json_escape "$error_code")"
+}
+
+case "${1:-}" in
+	register) do_register ;;
+	enable) do_enable ;;
+	disable) do_disable ;;
+	reconnect) do_reconnect ;;
+	status) do_status ;;
+	unregister) do_unregister ;;
+	*) emit_error 'invalid_action' ;;
+esac

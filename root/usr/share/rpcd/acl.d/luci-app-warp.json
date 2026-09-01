@@ -1,0 +1,17 @@
+{
+	"luci-app-warp": {
+		"description": "View and manage the standalone Cloudflare WARP interface",
+		"read": {
+			"ubus": {
+				"luci.warp": [ "status" ]
+			},
+			"uci": [ "warp" ]
+		},
+		"write": {
+			"ubus": {
+				"luci.warp": [ "register", "enable", "disable", "reconnect", "unregister" ]
+			},
+			"uci": [ "warp" ]
+		}
+	}
+}

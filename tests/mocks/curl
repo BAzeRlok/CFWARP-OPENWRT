@@ -1,0 +1,40 @@
+#!/bin/sh
+
+output=
+while [ "$#" -gt 0 ]; do
+	case "$1" in
+		--output)
+			shift
+			output=$1
+			;;
+	esac
+	shift
+done
+
+case "${MOCK_CURL_MODE:-valid}" in
+	delete_valid)
+		: >"$output"
+		printf '204'
+		;;
+	valid)
+		cp "${MOCK_REGISTRATION_FIXTURE:?}" "$output"
+		printf '201'
+		;;
+	invalid_json)
+		printf '{invalid' >"$output"
+		printf '200'
+		;;
+	dns_error)
+		exit 6
+		;;
+	tls_error)
+		exit 60
+		;;
+	http_500)
+		printf '{"error":"temporary"}' >"$output"
+		printf '500'
+		;;
+	*)
+		exit 2
+		;;
+esac

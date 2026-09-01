@@ -1,0 +1,30 @@
+#!/usr/bin/python3
+
+import json
+import sys
+
+args = sys.argv[1:]
+source = None
+expression = None
+for i, arg in enumerate(args):
+    if arg == "-i" and i + 1 < len(args):
+        source = args[i + 1]
+    elif arg == "-e" and i + 1 < len(args):
+        expression = args[i + 1]
+
+if source is None or expression is None:
+    raise SystemExit(2)
+
+with open(source, "r", encoding="utf-8") as stream:
+    value = json.load(stream)
+
+paths = {
+    "@.id": ["id"],
+    "@.access_token": ["access_token"],
+}
+path = paths.get(expression)
+if path is None:
+    raise SystemExit(1)
+for component in path:
+    value = value[component]
+print(value)
