@@ -18,8 +18,8 @@ route или kill switch. Выбор трафика для интерфейса 
 wget -qO- https://raw.githubusercontent.com/BAzeRlok/CFWARP-OPENWRT/main/install.sh | sh
 ```
 
-Он скачивает APK из GitHub Release `v1.4.1`, автоматически выбирает вариант
-backend по результату `apk --print-arch`, проверяет SHA-256, устанавливает
+Он скачивает APK из GitHub Release `v1.4.2`, автоматически выбирает вариант
+backend по пакетной архитектуре `DISTRIB_ARCH`, проверяет SHA-256, устанавливает
 пакеты и запускает регистрацию. По умолчанию используются QUIC и SNI
 `ozon.ru`. Для TCP/HTTP2:
 
@@ -70,11 +70,11 @@ Backend работает автономно и не читает конфигу�
 
 ## Ручная установка
 
-Скачайте из GitHub Release `v1.4.1` файл `SHA256SUMS`, два LuCI-пакета и
-вариант `warp-usque`, соответствующий результату `apk --print-arch`.
+Скачайте из GitHub Release `v1.4.2` файл `SHA256SUMS`, два LuCI-пакета и
+вариант `warp-usque`, соответствующий `DISTRIB_ARCH` из `/etc/openwrt_release`.
 
 ```sh
-ARCH="$(apk --print-arch)"
+ARCH="$(sed -n 's/^DISTRIB_ARCH=//p' /etc/openwrt_release | tr -d "'\"")"
 USQUE_PACKAGE="warp-usque-2.0.1-r3-$ARCH.apk"
 for PACKAGE in \
     "$USQUE_PACKAGE" \

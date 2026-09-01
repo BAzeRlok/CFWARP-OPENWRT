@@ -178,7 +178,9 @@ class PackageTests(unittest.TestCase):
         installer = (ROOT / "install.sh").read_text(encoding="utf-8")
         self.assertIn("aarch64|aarch64_cortex-a53)", installer)
         self.assertIn('USQUE_PACKAGE="warp-usque-2.0.1-r3-$ARCH.apk"', installer)
-        self.assertIn('RELEASE_TAG="v1.4.1"', installer)
+        self.assertIn("DISTRIB_ARCH", installer)
+        self.assertIn("OPENWRT_ARCH", installer)
+        self.assertIn('RELEASE_TAG="v1.4.2"', installer)
 
 
 if __name__ == "__main__":

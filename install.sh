@@ -4,7 +4,7 @@ set -eu
 umask 077
 
 REPOSITORY="BAzeRlok/CFWARP-OPENWRT"
-RELEASE_TAG="v1.4.1"
+RELEASE_TAG="v1.4.2"
 RELEASE_URL="https://github.com/$REPOSITORY/releases/download/$RELEASE_TAG"
 LUCI_PACKAGE="luci-app-warp-1.4.0-r1.apk"
 I18N_PACKAGE="luci-i18n-warp-ru-0.260901.59252.apk"
@@ -47,7 +47,11 @@ case "$TRANSPORT" in
 	*) die 'WARP_TRANSPORT должен быть quic или http2' ;;
 esac
 
-ARCH=$(apk --print-arch 2>/dev/null | sed -n '1p')
+ARCH=$(sed -n 's/^DISTRIB_ARCH=//p' /etc/openwrt_release 2>/dev/null | sed -n '1p' | tr -d "'\"")
+if [ -z "$ARCH" ]; then
+	ARCH=$(sed -n 's/^OPENWRT_ARCH=//p' /usr/lib/os-release 2>/dev/null | sed -n '1p' | tr -d "'\"")
+fi
+[ -n "$ARCH" ] || ARCH=$(apk --print-arch 2>/dev/null | sed -n '1p')
 case "$ARCH" in
 	aarch64|aarch64_cortex-a53)
 		USQUE_PACKAGE="warp-usque-2.0.1-r3-$ARCH.apk"
