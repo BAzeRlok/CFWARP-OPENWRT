@@ -109,12 +109,14 @@ class PackageTests(unittest.TestCase):
         self.assertIn("nativetun", init)
         self.assertNotIn("/etc/config/zapret", manager + init)
         self.assertNotIn("/opt/zapret", manager + init)
-        self.assertIn("PKG_HASH:=b8c77254d8b909e99b7b58d1bbbb4222ba436a1dad0967710406915be2481ef5", package)
+        self.assertIn("PKG_VERSION:=3.0.1", package)
+        self.assertIn("PKG_HASH:=d9764ef667e3db08c2126daa851fc81fef5017030206ec22d447638368146b97", package)
         self.assertIn("HelloChrome_Auto", patch)
         self.assertIn("forceHTTP1ALPN", patch)
         self.assertIn('AlpnProtocols: []string{"http/1.1"}', patch)
         self.assertIn("clientHelloFragmentConn", patch)
         self.assertIn("ServerName: host", patch)
+        self.assertIn("--reconnect-delay 1s", init)
         self.assertNotIn("--insecure", init)
 
     def test_runtime_start_reports_the_failed_phase(self):
@@ -164,7 +166,7 @@ class PackageTests(unittest.TestCase):
         makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
         self.assertIn("LUCI_PKGARCH:=all", makefile)
         self.assertIn("LUCI_NAME:=luci-app-warp", makefile)
-        self.assertIn("LUCI_EXTRA_DEPENDS:=kmod-tun (>=0), warp-usque (>=2.0.1)", makefile)
+        self.assertIn("LUCI_EXTRA_DEPENDS:=kmod-tun (>=0), warp-usque (>=3.0.1)", makefile)
         self.assertNotIn("+kmod-tun", makefile)
         self.assertNotIn("+warp-usque", makefile)
         self.assertNotIn("+wireguard-tools", makefile)
@@ -177,10 +179,10 @@ class PackageTests(unittest.TestCase):
     def test_installer_selects_supported_arm64_package(self):
         installer = (ROOT / "install.sh").read_text(encoding="utf-8")
         self.assertIn("aarch64|aarch64_cortex-a53)", installer)
-        self.assertIn('USQUE_PACKAGE="warp-usque-2.0.1-r3-$ARCH.apk"', installer)
+        self.assertIn('USQUE_PACKAGE="warp-usque-3.0.1-r1-$ARCH.apk"', installer)
         self.assertIn("DISTRIB_ARCH", installer)
         self.assertIn("OPENWRT_ARCH", installer)
-        self.assertIn('RELEASE_TAG="v1.4.2"', installer)
+        self.assertIn('RELEASE_TAG="v1.5.0"', installer)
 
 
 if __name__ == "__main__":

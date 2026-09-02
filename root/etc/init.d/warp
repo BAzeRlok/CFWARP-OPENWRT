@@ -39,7 +39,7 @@ start_service() {
 	procd_open_instance warp
 	procd_set_param command "$prog" --config "$config_file" nativetun \
 		--interface-name "$interface_name" --mtu "$mtu" \
-		--keepalive-period "${keepalive}s" --reconnect-delay 5s \
+		--keepalive-period "${keepalive}s" --reconnect-delay 1s \
 		--always-reconnect --sni-address "$sni"
 	[ "$transport" != http2 ] || procd_append_param command --http2
 	[ "$ipv4" -eq 1 ] || procd_append_param command --no-tunnel-ipv4
