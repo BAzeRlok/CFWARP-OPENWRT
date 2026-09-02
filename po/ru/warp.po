@@ -1,6 +1,6 @@
 msgid ""
 msgstr ""
-"Project-Id-Version: luci-app-warp 1.6.1\n"
+"Project-Id-Version: luci-app-warp 1.7.0\n"
 "PO-Revision-Date: 2026-09-02 00:00+0300\n"
 "Last-Translator: luci-app-warp contributors\n"
 "Language-Team: Russian\n"
@@ -17,14 +17,14 @@ msgstr "При обращении к Cloudflare произошла сетева�
 
 #: htdocs/luci-static/resources/view/warp/overview.js:268
 msgid ""
-"A reachable hostname used only as the MASQUE TLS SNI. The endpoint is still "
-"authenticated by its pinned public key. Empty uses ozon.ru. Cloudflare API "
-"registration has its own built-in protected TLS transport."
+"Hostname used as TLS SNI for QUIC/HTTP3 masking. HTTP/2 always uses the "
+"canonical Cloudflare MASQUE SNI for a reliable data plane. Empty uses "
+"ozon.ru. The endpoint remains authenticated by its pinned public key."
 msgstr ""
-"Доступное имя, используемое только как TLS SNI для MASQUE. Endpoint по-"
-"прежнему проверяется по закреплённому публичному ключу. Пустое поле "
-"использует ozon.ru. Для регистрации через API Cloudflare встроен отдельный "
-"защищённый TLS-транспорт."
+"Имя, используемое как TLS SNI для маскировки QUIC/HTTP3. Для надёжной "
+"передачи данных HTTP/2 всегда использует канонический MASQUE SNI Cloudflare. "
+"Пустое поле использует ozon.ru. Endpoint по-прежнему проверяется по "
+"закреплённому публичному ключу."
 
 #: htdocs/luci-static/resources/view/warp/overview.js:39
 msgid "A required package is missing."
@@ -155,8 +155,8 @@ msgid "Last error"
 msgstr "Последняя ошибка"
 
 #: htdocs/luci-static/resources/view/warp/overview.js:265
-msgid "MASQUE SNI"
-msgstr "SNI для MASQUE"
+msgid "QUIC SNI"
+msgstr "SNI для QUIC"
 
 #: htdocs/luci-static/resources/view/warp/overview.js:258
 msgid "MASQUE transport"

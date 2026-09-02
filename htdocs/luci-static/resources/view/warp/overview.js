@@ -263,10 +263,10 @@ return view.extend({
 		option.rmempty = false;
 		option.description = _('QUIC is recommended when it works on your network. Automatic mode switches to HTTP/2 only after three consecutive QUIC connection failures.');
 
-		option = section.taboption('advanced', form.Value, 'masque_sni', _('MASQUE SNI'));
+		option = section.taboption('advanced', form.Value, 'masque_sni', _('QUIC SNI'));
 		option.placeholder = 'ozon.ru';
 		option.optional = true;
-		option.description = _('A reachable hostname used only as the MASQUE TLS SNI. The endpoint is still authenticated by its pinned public key. Empty uses ozon.ru. Cloudflare API registration has its own built-in protected TLS transport.');
+		option.description = _('Hostname used as TLS SNI for QUIC/HTTP3 masking. HTTP/2 always uses the canonical Cloudflare MASQUE SNI for a reliable data plane. Empty uses ozon.ru. The endpoint remains authenticated by its pinned public key.');
 		option.validate = function(sectionId, value) {
 			if (!value)
 				return true;
