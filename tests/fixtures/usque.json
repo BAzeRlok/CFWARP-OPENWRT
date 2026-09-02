@@ -2,8 +2,6 @@
   "private_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
   "endpoint_v4": "162.159.193.10",
   "endpoint_v6": "2606:4700:d0::a29f:c00a",
-  "endpoint_h2_v4": "162.159.198.2",
-  "endpoint_h2_v6": "",
   "endpoint_pub_key": "-----BEGIN PUBLIC KEY-----\nTEST\n-----END PUBLIC KEY-----",
   "license": "",
   "id": "11111111-2222-4333-8444-555555555555",

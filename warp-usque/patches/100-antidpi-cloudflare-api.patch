@@ -20,34 +20,12 @@ index 850c3fc8a511ff7de99aef7c8a75e14561f58c27..ff8c0ef8d97c1c487e0ec0dc5532d2be
  	if err != nil {
  		return nil, fmt.Errorf("failed to send request: %v", err)
  	}
-diff --git a/api/masque.go b/api/masque.go
-index 6b2c5d9712cb68d8399245d789e1f9e7ed114f68..96c8b52c8774d6bbece8e5bebe5dcd725b3797bd 100644
---- a/api/masque.go
-+++ b/api/masque.go
-@@ -246,7 +246,7 @@ func newHTTP2Client(baseTLSConfig *tls.Config, endpoint *net.TCPAddr, connectURI
- 					return nil, err
- 				}
- 
--				tlsConn := tls.Client(conn, tlsConfig)
-+				tlsConn := tls.Client(&clientHelloFragmentConn{Conn: conn}, tlsConfig)
- 				if err := tlsConn.HandshakeContext(ctx); err != nil {
- 					_ = conn.Close()
- 					return nil, err
-@@ -286,7 +286,7 @@ func newHTTP2Client(baseTLSConfig *tls.Config, endpoint *net.TCPAddr, connectURI
- 				return nil, err
- 			}
- 
--			tlsConn := tls.Client(conn, dialTLSConfig)
-+			tlsConn := tls.Client(&clientHelloFragmentConn{Conn: conn}, dialTLSConfig)
- 			if err := tlsConn.HandshakeContext(ctx); err != nil {
- 				_ = conn.Close()
- 				return nil, err
 diff --git a/api/transport.go b/api/transport.go
 new file mode 100644
 index 0000000000000000000000000000000000000000..e40cda8c1b117135a4b2523a75efd55b970c6b5b
 --- /dev/null
 +++ b/api/transport.go
-@@ -0,0 +1,191 @@
+@@ -0,0 +1,190 @@
 +package api
 +
 +import (
@@ -94,10 +72,9 @@ index 0000000000000000000000000000000000000000..e40cda8c1b117135a4b2523a75efd55b
 +		ServerName: host,
 +		NextProtos: []string{"http/1.1"},
 +	}, utls.HelloChrome_Auto)
-+	// Chrome fingerprints advertise HTTP/2 by default. net/http cannot detect
-+	// the negotiated protocol on a custom uTLS connection and would parse HTTP/2
-+	// frames as an HTTP/1.x response. Build the preset first, then constrain its
-+	// ALPN extension to the protocol used by this Transport.
++	// Chrome fingerprints advertise multiple ALPN protocols by default. The
++	// custom transport expects HTTP/1.1, so constrain the preset before the
++	// handshake to keep response framing deterministic.
 +	if err = tlsConn.BuildHandshakeState(); err != nil {
 +		rawConn.Close()
 +		return nil, err
@@ -257,7 +234,7 @@ index 0000000000000000000000000000000000000000..11fac1227053797afaea43a29413070c
 +
 +func TestForceHTTP1ALPN(t *testing.T) {
 +	connection := &utls.UConn{Extensions: []utls.TLSExtension{
-+		&utls.ALPNExtension{AlpnProtocols: []string{"h2", "http/1.1"}},
++		&utls.ALPNExtension{AlpnProtocols: []string{"acme", "http/1.1"}},
 +	}}
 +	forceHTTP1ALPN(connection)
 +

@@ -4,11 +4,10 @@ set -eu
 umask 077
 
 REPOSITORY="BAzeRlok/CFWARP-OPENWRT"
-RELEASE_TAG="v1.7.4"
+RELEASE_TAG="v2.0.0"
 RELEASE_URL="https://github.com/$REPOSITORY/releases/download/$RELEASE_TAG"
-LUCI_PACKAGE="luci-app-warp-1.7.4-r1.apk"
-I18N_PACKAGE="luci-i18n-warp-ru-26.245.65813.bad68c5.apk"
-TRANSPORT="${WARP_TRANSPORT:-quic}"
+LUCI_PACKAGE="luci-app-warp-2.0.0-r1.apk"
+I18N_PACKAGE="luci-i18n-warp-ru-26.245.67241.b6a6f76.apk"
 MASQUE_SNI="${WARP_SNI:-ozon.ru}"
 
 die() {
@@ -42,11 +41,6 @@ verify_file() {
 command -v apk >/dev/null 2>&1 || die 'поддерживается только OpenWrt с apk'
 command -v uci >/dev/null 2>&1 || die 'не найден UCI'
 
-case "$TRANSPORT" in
-	auto|quic|http2) ;;
-	*) die 'WARP_TRANSPORT должен быть auto, quic или http2' ;;
-esac
-
 ARCH=$(sed -n 's/^DISTRIB_ARCH=//p' /etc/openwrt_release 2>/dev/null | sed -n '1p' | tr -d "'\"")
 if [ -z "$ARCH" ]; then
 	ARCH=$(sed -n 's/^OPENWRT_ARCH=//p' /usr/lib/os-release 2>/dev/null | sed -n '1p' | tr -d "'\"")
@@ -54,7 +48,7 @@ fi
 [ -n "$ARCH" ] || ARCH=$(apk --print-arch 2>/dev/null | sed -n '1p')
 case "$ARCH" in
 	aarch64|aarch64_cortex-a53)
-		USQUE_PACKAGE="warp-usque-4.2.1-r7-$ARCH.apk"
+		USQUE_PACKAGE="warp-usque-4.2.1-r8-$ARCH.apk"
 		;;
 	*)
 		die "для архитектуры $ARCH пока нет warp-usque; поддерживаются aarch64 и aarch64_cortex-a53"
@@ -77,7 +71,6 @@ apk add --allow-untrusted \
 	"$INSTALL_DIR/$LUCI_PACKAGE" \
 	"$INSTALL_DIR/$I18N_PACKAGE"
 
-uci set warp.main.masque_transport="$TRANSPORT"
 uci set warp.main.masque_sni="$MASQUE_SNI"
 uci commit warp
 

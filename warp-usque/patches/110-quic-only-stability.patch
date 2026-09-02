@@ -1,0 +1,860 @@
+diff --git a/api/masque.go b/api/masque.go
+index 6b2c5d9712cb68d8399245d789e1f9e7ed114f68..7a635d2002979f0c8efd20973f857c2d49eb94b3 100644
+--- a/api/masque.go
++++ b/api/masque.go
+@@ -9,14 +9,12 @@ import (
+ 	"fmt"
+ 	"net"
+ 	"net/http"
+-	"net/url"
+ 	"strings"
+ 
+ 	connectip "github.com/Diniboy1123/connect-ip-go"
+ 	"github.com/quic-go/quic-go"
+ 	"github.com/quic-go/quic-go/http3"
+ 	"github.com/yosida95/uritemplate/v3"
+-	"golang.org/x/net/http2"
+ )
+ 
+ // PrepareTlsConfig creates a TLS configuration using the provided certificate and SNI (Server Name Indication).
+@@ -48,7 +46,6 @@ func PrepareTlsConfig(privKey *ecdsa.PrivateKey, peerPubKey *ecdsa.PublicKey, ce
+ 		// Cloudflare adds support for more curves in the future and I don't want to hardcode it here
+ 		// NOTE: If I add more than one, Go will still use one share it picks and it was never P-256 for me
+ 		// so kept it doing HRRs for now.
+-		// I couldn't get the official client to work with HTTP/2, so couldn't check its behavior.
+ 		/*CurvePreferences: []tls.CurveID{
+ 			tls.CurveP256,
+ 		},*/
+@@ -88,56 +85,28 @@ func PrepareTlsConfig(privKey *ecdsa.PrivateKey, peerPubKey *ecdsa.PublicKey, ce
+ 	return tlsConfig, nil
+ }
+ 
+-// ConnectTunnel establishes a Connect-IP tunnel with the provided endpoint.
+-// When useHTTP2 is false it dials over QUIC/HTTP3; when true it dials over TCP/HTTP2.
++// ConnectTunnel establishes a Connect-IP tunnel over QUIC/HTTP3.
+ // Requires modified connect-ip-go for now to support Cloudflare's non RFC compliant implementation.
+ //
+ // Parameters:
+ //   - ctx: context.Context - The connection context.
+ //   - tlsConfig: *tls.Config - The TLS configuration for secure communication.
+-//   - quicConfig: *quic.Config - The QUIC configuration settings (ignored in HTTP/2 mode).
++//   - quicConfig: *quic.Config - The QUIC configuration settings.
+ //   - connectUri: string - The URI template for the Connect-IP request.
+-//   - endpoint: net.Addr - The remote endpoint (*net.UDPAddr for HTTP/3, *net.TCPAddr for HTTP/2).
+-//   - useHTTP2: bool - When true, connect over TCP+TLS/HTTP2 instead of QUIC/HTTP3.
++//   - endpoint: net.Addr - The remote UDP endpoint.
+ //
+ // Returns:
+-//   - *net.UDPConn: The UDP connection used for the QUIC session (nil in HTTP/2 mode).
+-//   - *http3.Transport: The HTTP/3 transport (nil in HTTP/2 mode).
++//   - *net.UDPConn: The UDP connection used for the QUIC session.
++//   - *http3.Transport: The HTTP/3 transport.
+ //   - *connectip.Conn: The Connect-IP connection instance.
+ //   - *http.Response: The response from the Connect-IP handshake.
+ //   - error: An error if the connection setup fails.
+-func ConnectTunnel(ctx context.Context, tlsConfig *tls.Config, quicConfig *quic.Config, connectUri string, endpoint net.Addr, useHTTP2 bool) (*net.UDPConn, *http3.Transport, *connectip.Conn, *http.Response, error) {
++func ConnectTunnel(ctx context.Context, tlsConfig *tls.Config, quicConfig *quic.Config, connectUri string, endpoint net.Addr) (*net.UDPConn, *http3.Transport, *connectip.Conn, *http.Response, error) {
+ 	template := uritemplate.MustNew(connectUri)
+ 	additionalHeaders := http.Header{
+ 		"User-Agent": []string{""},
+ 	}
+ 
+-	if useHTTP2 {
+-		h2Endpoint, ok := endpoint.(*net.TCPAddr)
+-		if !ok || h2Endpoint == nil {
+-			return nil, nil, nil, nil, errors.New("missing HTTP/2 TCP endpoint")
+-		}
+-
+-		h2Headers := additionalHeaders.Clone()
+-		h2Headers.Set("cf-connect-proto", "cf-connect-ip")
+-		// TODO: support PQC
+-		h2Headers.Set("pq-enabled", "false")
+-
+-		h2Client, err := newHTTP2Client(tlsConfig, h2Endpoint, connectUri)
+-		if err != nil {
+-			return nil, nil, nil, nil, fmt.Errorf("failed to create HTTP/2 client: %w", err)
+-		}
+-
+-		ipConn, rsp, err := connectip.DialH2(ctx, h2Client, template, h2Headers)
+-		if err != nil {
+-			if strings.Contains(err.Error(), "tls: access denied") {
+-				return nil, nil, nil, nil, errors.New("login failed! Please double-check if your tls key and cert is enrolled in the Cloudflare Access service")
+-			}
+-			return nil, nil, nil, nil, fmt.Errorf("failed to dial connect-ip over HTTP/2: %w", err)
+-		}
+-		return nil, nil, ipConn, rsp, nil
+-	}
+-
+ 	quicEndpoint, ok := endpoint.(*net.UDPAddr)
+ 	if !ok || quicEndpoint == nil {
+ 		return nil, nil, nil, nil, errors.New("missing HTTP/3 UDP endpoint")
+@@ -219,108 +188,3 @@ func isRetryableHTTP3ConnectFailure(err error) bool {
+ 	return strings.Contains(msg, "failed to read response") &&
+ 		strings.Contains(msg, "PROTOCOL_VIOLATION")
+ }
+-
+-// newHTTP2Client builds an HTTP client for CONNECT-IP over HTTP/2.
+-// It honors proxy environment variables and pins dialing to the selected endpoint.
+-func newHTTP2Client(baseTLSConfig *tls.Config, endpoint *net.TCPAddr, connectURI string) (*http.Client, error) {
+-	if endpoint == nil {
+-		return nil, errors.New("missing HTTP/2 endpoint")
+-	}
+-
+-	parsedURI, err := url.Parse(connectURI)
+-	if err != nil {
+-		return nil, fmt.Errorf("failed to parse connect URI: %w", err)
+-	}
+-
+-	proxyURL, _ := http.ProxyFromEnvironment(&http.Request{URL: parsedURI})
+-
+-	tlsConfig := baseTLSConfig.Clone()
+-	tlsConfig.NextProtos = []string{"h2"}
+-
+-	if proxyURL == nil {
+-		transport := &http2.Transport{
+-			DialTLSContext: func(ctx context.Context, network, _ string, _ *tls.Config) (net.Conn, error) {
+-				dialer := &net.Dialer{}
+-				conn, err := dialer.DialContext(ctx, network, endpoint.String())
+-				if err != nil {
+-					return nil, err
+-				}
+-
+-				tlsConn := tls.Client(conn, tlsConfig)
+-				if err := tlsConn.HandshakeContext(ctx); err != nil {
+-					_ = conn.Close()
+-					return nil, err
+-				}
+-				return tlsConn, nil
+-			},
+-		}
+-
+-		return &http.Client{Transport: transport}, nil
+-	}
+-
+-	originAuthority := authorityWithDefaultPort(parsedURI, "443")
+-	proxyAuthority := authorityWithDefaultPort(proxyURL, proxyDefaultPort(proxyURL))
+-	dialer := &net.Dialer{}
+-	transport := &http.Transport{
+-		Proxy:              http.ProxyFromEnvironment,
+-		ForceAttemptHTTP2:  true,
+-		DisableCompression: true,
+-		TLSClientConfig:    tlsConfig,
+-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+-			if addr == originAuthority {
+-				addr = endpoint.String()
+-			}
+-			return dialer.DialContext(ctx, network, addr)
+-		},
+-		DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+-			dialAddr := addr
+-			dialTLSConfig := tlsConfig
+-			if addr == proxyAuthority && proxyURL != nil {
+-				dialTLSConfig = &tls.Config{ServerName: proxyURL.Hostname()}
+-			} else if addr == originAuthority {
+-				dialAddr = endpoint.String()
+-			}
+-
+-			conn, err := dialer.DialContext(ctx, network, dialAddr)
+-			if err != nil {
+-				return nil, err
+-			}
+-
+-			tlsConn := tls.Client(conn, dialTLSConfig)
+-			if err := tlsConn.HandshakeContext(ctx); err != nil {
+-				_ = conn.Close()
+-				return nil, err
+-			}
+-			return tlsConn, nil
+-		},
+-	}
+-
+-	return &http.Client{Transport: transport}, nil
+-}
+-
+-// authorityWithDefaultPort normalizes URL authority by adding a default port when missing.
+-func authorityWithDefaultPort(u *url.URL, defaultPort string) string {
+-	if u == nil {
+-		return ""
+-	}
+-
+-	host := u.Hostname()
+-	if host == "" {
+-		return u.Host
+-	}
+-
+-	port := u.Port()
+-	if port == "" {
+-		port = defaultPort
+-	}
+-
+-	return net.JoinHostPort(host, port)
+-}
+-
+-// proxyDefaultPort returns the default port for proxy scheme.
+-func proxyDefaultPort(u *url.URL) string {
+-	if u != nil && u.Scheme == "https" {
+-		return "443"
+-	}
+-	return "80"
+-}
+diff --git a/api/tunnel.go b/api/tunnel.go
+index 5f06187acfa7bf4d075220141010e57edd157259..017099f5f831f567a911db6bf6132d949d88622b 100644
+--- a/api/tunnel.go
++++ b/api/tunnel.go
+@@ -149,11 +149,16 @@ func NewWaterAdapter(iface *water.Interface) TunnelDevice {
+ 	return &WaterAdapter{iface: iface}
+ }
+ 
+-// pumpShutdownGrace bounds how long the supervisor waits for both forwarding
+-// pumps to exit after an error before spawning a fresh pair. A device-side
+-// pump may still be parked in a blocking TUN read during this window; the
+-// readMu serializes any overlap with the next cycle's device reader.
+-const pumpShutdownGrace = 2 * time.Second
++const (
++	// pumpShutdownGrace bounds how long the supervisor waits for both
++	// forwarding pumps to exit after an error before reconnecting.
++	pumpShutdownGrace = 2 * time.Second
++	// Keep only the packet that triggered a reconnect. A larger userspace FIFO
++	// creates avoidable head-of-line delay on a lossy or congested QUIC path.
++	devicePacketQueueSize = 1
++)
++
++var errDevicePacketReaderStopped = errors.New("TUN device packet reader stopped")
+ 
+ // CONNECT-IP context ID 0 is encoded as a one-byte QUIC varint. Reserving this
+ // byte before packets lets connect-ip-go send outbound datagrams in place.
+@@ -169,7 +174,6 @@ type MaintainTunnelConfig struct {
+ 	MTU               int
+ 	ReconnectDelay    time.Duration
+ 	AlwaysReconnect   bool
+-	UseHTTP2          bool
+ 	// OnConnect is a path to an executable run after every successful tunnel
+ 	// connect. It is exec'd directly (no shell, no args) and runs fire-and-forget.
+ 	OnConnect string
+@@ -182,6 +186,43 @@ type MaintainTunnelConfig struct {
+ 	HookEnv map[string]string
+ }
+ 
++type devicePacket struct {
++	buf  []byte
++	size int
++	err  error
++}
++
++// startDevicePacketReader keeps exactly one TUN reader alive for the lifetime
++// of the process. Reconnects therefore cannot leave stale readers behind to
++// steal packets from the next QUIC connection.
++func startDevicePacketReader(ctx context.Context, device TunnelDevice, packetBufferPool *NetBuffer) <-chan *devicePacket {
++	packets := make(chan *devicePacket, devicePacketQueueSize)
++	go func() {
++		defer close(packets)
++		for {
++			buf := packetBufferPool.Get()
++			n, err := device.ReadPacket(buf[datagramContextIDHeadroom:])
++			if err != nil {
++				packetBufferPool.Put(buf)
++				select {
++				case packets <- &devicePacket{err: err}:
++				case <-ctx.Done():
++				}
++				return
++			}
++
++			packet := &devicePacket{buf: buf, size: n}
++			select {
++			case packets <- packet:
++			case <-ctx.Done():
++				packetBufferPool.Put(buf)
++				return
++			}
++		}
++	}()
++	return packets
++}
++
+ // cloneHookEnv returns a shallow copy of src so concurrent hook invocations
+ // do not share a map.
+ func cloneHookEnv(src map[string]string) map[string]string {
+@@ -220,17 +261,13 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
+ //   - ctx: context.Context - The context for the connection.
+ //   - cfg: MaintainTunnelConfig - Tunnel maintenance runtime configuration.
+ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
+-	if cfg.UseHTTP2 {
+-		if _, ok := cfg.Endpoint.(*net.TCPAddr); !ok {
+-			log.Fatalf("MaintainTunnel: HTTP/2 mode requires a *net.TCPAddr endpoint, got %T", cfg.Endpoint)
+-		}
+-	} else {
+-		if _, ok := cfg.Endpoint.(*net.UDPAddr); !ok {
+-			log.Fatalf("MaintainTunnel: HTTP/3 mode requires a *net.UDPAddr endpoint, got %T", cfg.Endpoint)
+-		}
++	if _, ok := cfg.Endpoint.(*net.UDPAddr); !ok {
++		log.Fatalf("MaintainTunnel: QUIC mode requires a *net.UDPAddr endpoint, got %T", cfg.Endpoint)
+ 	}
+ 
+ 	packetBufferPool := NewNetBuffer(cfg.MTU + datagramContextIDHeadroom)
++	devicePackets := startDevicePacketReader(ctx, cfg.Device, packetBufferPool)
++	var pendingDevicePacket *devicePacket
+ 
+ 	for {
+ 		if ctx.Err() != nil {
+@@ -239,18 +276,22 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
+ 
+ 		if !cfg.AlwaysReconnect {
+ 			log.Println("Tunnel idle. Waiting for outbound activity before reconnecting...")
+-			buf := packetBufferPool.Get()
+-			n, err := cfg.Device.ReadPacket(buf[datagramContextIDHeadroom:])
+-			if err != nil {
+-				packetBufferPool.Put(buf)
+-				log.Printf("Failed to read from TUN device while waiting for activity: %v", err)
+-				if sleepErr := sleepCtx(ctx, cfg.ReconnectDelay); sleepErr != nil {
++			if pendingDevicePacket == nil {
++				var ok bool
++				select {
++				case pendingDevicePacket, ok = <-devicePackets:
++					if !ok {
++						return
++					}
++				case <-ctx.Done():
+ 					return
+ 				}
+-				continue
+ 			}
+-			packetBufferPool.Put(buf)
+-			log.Printf("Detected outbound activity (%d bytes). Reconnecting...", n)
++			if pendingDevicePacket.err != nil {
++				log.Printf("Failed to read from TUN device while waiting for activity: %v", pendingDevicePacket.err)
++				return
++			}
++			log.Printf("Detected outbound activity (%d bytes). Reconnecting...", pendingDevicePacket.size)
+ 		}
+ 
+ 		log.Printf("Establishing MASQUE connection to %s", cfg.Endpoint)
+@@ -260,7 +301,6 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
+ 			internal.DefaultQuicConfig(cfg.KeepalivePeriod, cfg.InitialPacketSize),
+ 			internal.ConnectURI,
+ 			cfg.Endpoint,
+-			cfg.UseHTTP2,
+ 		)
+ 		if err != nil {
+ 			log.Printf("Failed to connect tunnel: %v", err)
+@@ -305,32 +345,39 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
+ 		errChan := make(chan error, 2)
+ 		pumpCtx, cancelPumps := context.WithCancel(ctx)
+ 		var wg sync.WaitGroup
+-		var readMu sync.Mutex
++		initialDevicePacket := pendingDevicePacket
++		pendingDevicePacket = nil
+ 
+ 		wg.Add(2)
+ 
+ 		go func() {
+ 			defer wg.Done()
+ 			for {
+-				if pumpCtx.Err() != nil {
+-					return
++				packet := initialDevicePacket
++				initialDevicePacket = nil
++				if packet == nil {
++					var ok bool
++					select {
++					case packet, ok = <-devicePackets:
++						if !ok {
++							errChan <- errDevicePacketReaderStopped
++							return
++						}
++					case <-pumpCtx.Done():
++						return
++					}
+ 				}
+-				buf := packetBufferPool.Get()
+-				readMu.Lock()
+-				n, err := cfg.Device.ReadPacket(buf[datagramContextIDHeadroom:])
+-				readMu.Unlock()
+-				if err != nil {
+-					packetBufferPool.Put(buf)
+-					errChan <- fmt.Errorf("failed to read from TUN device: %w", err)
++				if packet.err != nil {
++					errChan <- fmt.Errorf("%w: %v", errDevicePacketReaderStopped, packet.err)
+ 					return
+ 				}
+ 				if pumpCtx.Err() != nil {
+-					packetBufferPool.Put(buf)
++					packetBufferPool.Put(packet.buf)
+ 					return
+ 				}
+-				icmp, err := ipConn.WritePacketBuffer(buf, datagramContextIDHeadroom, n)
++				icmp, err := ipConn.WritePacketBuffer(packet.buf, datagramContextIDHeadroom, packet.size)
+ 				if err != nil {
+-					packetBufferPool.Put(buf)
++					packetBufferPool.Put(packet.buf)
+ 					if errors.As(err, new(*connectip.CloseError)) {
+ 						errChan <- fmt.Errorf("connection closed while writing to IP connection: %w", err)
+ 						return
+@@ -338,7 +385,7 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
+ 					log.Printf("Error writing to IP connection: %v, continuing...", err)
+ 					continue
+ 				}
+-				packetBufferPool.Put(buf)
++				packetBufferPool.Put(packet.buf)
+ 
+ 				if len(icmp) > 0 {
+ 					if err := cfg.Device.WritePacket(icmp); err != nil {
+@@ -357,10 +404,6 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
+ 			for {
+ 				packet, err := ipConn.ReadPacketZeroCopy(true)
+ 				if err != nil {
+-					if cfg.UseHTTP2 {
+-						errChan <- fmt.Errorf("connection closed while reading from IP connection: %w", err)
+-						return
+-					}
+ 					if errors.As(err, new(*connectip.CloseError)) {
+ 						errChan <- fmt.Errorf("connection closed while reading from IP connection: %w", err)
+ 						return
+@@ -375,8 +418,17 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
+ 			}
+ 		}()
+ 
+-		err = <-errChan
+-		log.Printf("Tunnel connection lost: %v. Reconnecting...", err)
++		select {
++		case err = <-errChan:
++		case <-ctx.Done():
++			err = ctx.Err()
++		}
++		deviceReaderStopped := errors.Is(err, errDevicePacketReaderStopped)
++		if deviceReaderStopped {
++			log.Printf("Tunnel stopped: %v", err)
++		} else {
++			log.Printf("Tunnel connection lost: %v. Reconnecting...", err)
++		}
+ 
+ 		if cfg.OnDisconnect != "" {
+ 			env := cloneHookEnv(cfg.HookEnv)
+@@ -396,7 +448,7 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
+ 		select {
+ 		case <-done:
+ 		case <-time.After(pumpShutdownGrace):
+-			log.Printf("Pump shutdown grace of %s expired; a stale TUN reader may still be parked (readMu will serialize next cycle)", pumpShutdownGrace)
++			log.Printf("Pump shutdown grace of %s expired", pumpShutdownGrace)
+ 		}
+ 
+ 		if tr != nil {
+@@ -405,6 +457,9 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
+ 		if udpConn != nil {
+ 			_ = udpConn.Close()
+ 		}
++		if deviceReaderStopped {
++			return
++		}
+ 		if sleepErr := sleepCtx(ctx, cfg.ReconnectDelay); sleepErr != nil {
+ 			return
+ 		}
+diff --git a/api/tunnel_quic_test.go b/api/tunnel_quic_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..bf3426a2edf27e0465434b5e28c1b677c299a764
+--- /dev/null
++++ b/api/tunnel_quic_test.go
+@@ -0,0 +1,70 @@
++package api
++
++import (
++	"bytes"
++	"context"
++	"errors"
++	"testing"
++	"time"
++)
++
++type deviceReadResult struct {
++	packet []byte
++	err    error
++}
++
++type fakeTunnelDevice struct {
++	reads chan deviceReadResult
++}
++
++func (f *fakeTunnelDevice) ReadPacket(buf []byte) (int, error) {
++	result := <-f.reads
++	if result.err != nil {
++		return 0, result.err
++	}
++	return copy(buf, result.packet), nil
++}
++
++func (f *fakeTunnelDevice) WritePacket([]byte) error { return nil }
++
++func TestDevicePacketQueueStaysLowLatency(t *testing.T) {
++	if devicePacketQueueSize != 1 {
++		t.Fatalf("unexpected device packet queue size: got %d, want 1", devicePacketQueueSize)
++	}
++}
++
++func TestDevicePacketReaderPreservesPacketsAcrossConsumers(t *testing.T) {
++	ctx, cancel := context.WithCancel(context.Background())
++	defer cancel()
++	device := &fakeTunnelDevice{reads: make(chan deviceReadResult, 3)}
++	device.reads <- deviceReadResult{packet: []byte{1, 2, 3}}
++	device.reads <- deviceReadResult{packet: []byte{4, 5, 6}}
++	device.reads <- deviceReadResult{err: errors.New("device closed")}
++
++	pool := NewNetBuffer(128)
++	packets := startDevicePacketReader(ctx, device, pool)
++	for _, expected := range [][]byte{{1, 2, 3}, {4, 5, 6}} {
++		select {
++		case packet := <-packets:
++			if packet.err != nil {
++				t.Fatalf("unexpected read error: %v", packet.err)
++			}
++			actual := packet.buf[datagramContextIDHeadroom : datagramContextIDHeadroom+packet.size]
++			if !bytes.Equal(actual, expected) {
++				t.Fatalf("packet = %v, want %v", actual, expected)
++			}
++			pool.Put(packet.buf)
++		case <-time.After(time.Second):
++			t.Fatal("timed out waiting for packet")
++		}
++	}
++
++	select {
++	case packet := <-packets:
++		if packet == nil || packet.err == nil {
++			t.Fatalf("expected terminal device error, got %#v", packet)
++		}
++	case <-time.After(time.Second):
++		t.Fatal("timed out waiting for device error")
++	}
++}
+diff --git a/cmd/enroll.go b/cmd/enroll.go
+index 1db7918445b04ea67a6e4dd13a0743e92fb4665e..e85bc8eea9209f7753919f97f480b30650fa3a1e 100644
+--- a/cmd/enroll.go
++++ b/cmd/enroll.go
+@@ -96,11 +96,6 @@ var enrollCmd = &cobra.Command{
+ 
+ 		log.Printf("Successful registration. Saving config...")
+ 
+-		h2v4 := config.AppConfig.EndpointH2V4
+-		if h2v4 == "" {
+-			h2v4 = config.DefaultEndpointH2V4
+-		}
+-
+ 		config.AppConfig = config.Config{
+ 			PrivateKey: base64.StdEncoding.EncodeToString(privKeyBytes),
+ 			// TODO: proper endpoint parsing in utils
+@@ -108,8 +103,6 @@ var enrollCmd = &cobra.Command{
+ 			EndpointV4: accountData.Config.Peers[0].Endpoint.V4[:len(accountData.Config.Peers[0].Endpoint.V4)-2],
+ 			// strip [ from beginning and ]:0 from end
+ 			EndpointV6:     accountData.Config.Peers[0].Endpoint.V6[1 : len(accountData.Config.Peers[0].Endpoint.V6)-3],
+-			EndpointH2V4:   h2v4,
+-			EndpointH2V6:   config.AppConfig.EndpointH2V6,
+ 			EndpointPubKey: accountData.Config.Peers[0].PublicKey,
+ 			ID:             accountData.ID,
+ 			AccessToken:    config.AppConfig.AccessToken,
+diff --git a/cmd/httpproxy.go b/cmd/httpproxy.go
+index 505cffa9b755187574eb292da884a88c429855d4..9fbd4adc4e28761118c11df71260f6c8a33b16ca 100644
+--- a/cmd/httpproxy.go
++++ b/cmd/httpproxy.go
+@@ -92,19 +92,13 @@ var httpProxyCmd = &cobra.Command{
+ 			return
+ 		}
+ 
+-		useHTTP2, err := cmd.Flags().GetBool("http2")
+-		if err != nil {
+-			cmd.Printf("Failed to get HTTP/2 flag: %v\n", err)
+-			return
+-		}
+-
+ 		useIPv6, err := cmd.Flags().GetBool("ipv6")
+ 		if err != nil {
+ 			cmd.Printf("Failed to get ipv6 flag: %v\n", err)
+ 			return
+ 		}
+ 
+-		endpoint, err := config.SelectEndpointFromConfig(useHTTP2, useIPv6, connectPort)
++		endpoint, err := config.SelectEndpointFromConfig(useIPv6, connectPort)
+ 		if err != nil {
+ 			cmd.Printf("Failed to select endpoint: %v\n", err)
+ 			return
+@@ -114,10 +108,6 @@ var httpProxyCmd = &cobra.Command{
+ 			config.WarnInsecure()
+ 		}
+ 
+-		if useHTTP2 {
+-			config.LogHTTP2Endpoint(endpoint)
+-		}
+-
+ 		tunnelIPv4, err := cmd.Flags().GetBool("no-tunnel-ipv4")
+ 		if err != nil {
+ 			cmd.Printf("Failed to get no tunnel IPv4: %v\n", err)
+@@ -257,7 +247,6 @@ var httpProxyCmd = &cobra.Command{
+ 			MTU:               mtu,
+ 			ReconnectDelay:    reconnectDelay,
+ 			AlwaysReconnect:   alwaysReconnect,
+-			UseHTTP2:          useHTTP2,
+ 			OnConnect:         onConnect,
+ 			OnDisconnect:      onDisconnect,
+ 			HookEnv:           hookEnv,
+@@ -444,7 +433,6 @@ func init() {
+ 	httpProxyCmd.Flags().Uint16P("initial-packet-size", "i", 0, "Custom initial packet size for MASQUE connection (default: auto with PMTU discovery)")
+ 	httpProxyCmd.Flags().DurationP("reconnect-delay", "r", 1*time.Second, "Delay between reconnect attempts")
+ 	httpProxyCmd.Flags().Bool("always-reconnect", false, "Always reconnect after tunnel loss, even when idle")
+-	httpProxyCmd.Flags().Bool("http2", false, "Use HTTP/2 over TCP+TLS instead of HTTP/3 over QUIC."+config.EndpointHelpSuffixH2)
+ 	httpProxyCmd.Flags().Bool("insecure", false, "Disable endpoint certificate pinning and trust any certificate")
+ 	httpProxyCmd.Flags().BoolP("local-dns", "l", false, "Do not send proxy DNS through the tunnel; use -d over the host instead. Add --system-dns to use the OS resolver instead of -d")
+ 	httpProxyCmd.Flags().Bool("system-dns", false, "With -l, resolve names via the OS (e.g. /etc/resolv.conf) instead of -d")
+diff --git a/cmd/l4_helpers.go b/cmd/l4_helpers.go
+index a39492f82b42145fd55b802cc9b47771b702f3dd..7237e7b79acbade6f7c09258ab1b2e12e7e100fa 100644
+--- a/cmd/l4_helpers.go
++++ b/cmd/l4_helpers.go
+@@ -110,7 +110,7 @@ func buildL4Proxy(cmd *cobra.Command, mode string) (l4ProxyOptions, *api.L4Proxy
+ 		config.WarnInsecure()
+ 	}
+ 
+-	endpointAddr, err := config.SelectEndpointFromConfig(false, opts.useIPv6, opts.connectPort)
++	endpointAddr, err := config.SelectEndpointFromConfig(opts.useIPv6, opts.connectPort)
+ 	if err != nil {
+ 		return opts, nil, fmt.Errorf("failed to select endpoint: %v", err)
+ 	}
+diff --git a/cmd/nativetun.go b/cmd/nativetun.go
+index 840c99944bd48dd58d3c21bc5df00d19c3e2d768..46d4ea98262320cb24c06df145e7f74cafc692e9 100644
+--- a/cmd/nativetun.go
++++ b/cmd/nativetun.go
+@@ -82,19 +82,13 @@ var nativeTunCmd = &cobra.Command{
+ 			return
+ 		}
+ 
+-		useHTTP2, err := cmd.Flags().GetBool("http2")
+-		if err != nil {
+-			cmd.Printf("Failed to get HTTP/2 flag: %v\n", err)
+-			return
+-		}
+-
+ 		useIPv6, err := cmd.Flags().GetBool("ipv6")
+ 		if err != nil {
+ 			cmd.Printf("Failed to get ipv6 flag: %v\n", err)
+ 			return
+ 		}
+ 
+-		endpoint, err := config.SelectEndpointFromConfig(useHTTP2, useIPv6, connectPort)
++		endpoint, err := config.SelectEndpointFromConfig(useIPv6, connectPort)
+ 		if err != nil {
+ 			cmd.Printf("Failed to select endpoint: %v\n", err)
+ 			return
+@@ -104,10 +98,6 @@ var nativeTunCmd = &cobra.Command{
+ 			config.WarnInsecure()
+ 		}
+ 
+-		if useHTTP2 {
+-			config.LogHTTP2Endpoint(endpoint)
+-		}
+-
+ 		tunnelIPv4, err := cmd.Flags().GetBool("no-tunnel-ipv4")
+ 		if err != nil {
+ 			cmd.Printf("Failed to get no tunnel IPv4: %v\n", err)
+@@ -212,7 +202,6 @@ var nativeTunCmd = &cobra.Command{
+ 			MTU:               mtu,
+ 			ReconnectDelay:    reconnectDelay,
+ 			AlwaysReconnect:   alwaysReconnect,
+-			UseHTTP2:          useHTTP2,
+ 			OnConnect:         onConnect,
+ 			OnDisconnect:      onDisconnect,
+ 			HookEnv:           hookEnv,
+@@ -236,7 +225,6 @@ func init() {
+ 	nativeTunCmd.Flags().BoolP("no-iproute2", "I", false, "Linux only: Do not set up IP addresses and do not set the link up")
+ 	nativeTunCmd.Flags().DurationP("reconnect-delay", "r", 1*time.Second, "Delay between reconnect attempts")
+ 	nativeTunCmd.Flags().Bool("always-reconnect", false, "Always reconnect after tunnel loss, even when idle")
+-	nativeTunCmd.Flags().Bool("http2", false, "Use HTTP/2 over TCP+TLS instead of HTTP/3 over QUIC."+config.EndpointHelpSuffixH2)
+ 	nativeTunCmd.Flags().Bool("insecure", false, "Disable endpoint certificate pinning and trust any certificate")
+ 	nativeTunCmd.Flags().StringP("interface-name", "n", "", "Custom interface name for the TUN interface")
+ 	nativeTunCmd.Flags().Bool("persist", false, "Linux only: Keep the TUN interface after exit")
+diff --git a/cmd/portfw.go b/cmd/portfw.go
+index 85691e6ed90ea7520a2e822f1970839e7e6efabe..ab7e2834029e7b394556f32c7b9ba18747ba9f07 100644
+--- a/cmd/portfw.go
++++ b/cmd/portfw.go
+@@ -81,19 +81,13 @@ var portFwCmd = &cobra.Command{
+ 			return
+ 		}
+ 
+-		useHTTP2, err := cmd.Flags().GetBool("http2")
+-		if err != nil {
+-			cmd.Printf("Failed to get HTTP/2 flag: %v\n", err)
+-			return
+-		}
+-
+ 		useIPv6, err := cmd.Flags().GetBool("ipv6")
+ 		if err != nil {
+ 			cmd.Printf("Failed to get ipv6 flag: %v\n", err)
+ 			return
+ 		}
+ 
+-		endpoint, err := config.SelectEndpointFromConfig(useHTTP2, useIPv6, connectPort)
++		endpoint, err := config.SelectEndpointFromConfig(useIPv6, connectPort)
+ 		if err != nil {
+ 			cmd.Printf("Failed to select endpoint: %v\n", err)
+ 			return
+@@ -103,10 +97,6 @@ var portFwCmd = &cobra.Command{
+ 			config.WarnInsecure()
+ 		}
+ 
+-		if useHTTP2 {
+-			config.LogHTTP2Endpoint(endpoint)
+-		}
+-
+ 		tunnelIPv4, err := cmd.Flags().GetBool("no-tunnel-ipv4")
+ 		if err != nil {
+ 			cmd.Printf("Failed to get no tunnel IPv4: %v\n", err)
+@@ -258,7 +248,6 @@ var portFwCmd = &cobra.Command{
+ 			MTU:               mtu,
+ 			ReconnectDelay:    reconnectDelay,
+ 			AlwaysReconnect:   alwaysReconnect,
+-			UseHTTP2:          useHTTP2,
+ 			OnConnect:         onConnect,
+ 			OnDisconnect:      onDisconnect,
+ 			HookEnv:           hookEnv,
+@@ -413,7 +402,6 @@ func init() {
+ 	portFwCmd.Flags().IntP("mtu", "m", 1280, "MTU for MASQUE connection")
+ 	portFwCmd.Flags().Uint16P("initial-packet-size", "i", 0, "Custom initial packet size for MASQUE connection (default: auto with PMTU discovery)")
+ 	portFwCmd.Flags().DurationP("reconnect-delay", "r", 1*time.Second, "Delay between reconnect attempts")
+-	portFwCmd.Flags().Bool("http2", false, "Use HTTP/2 over TCP+TLS instead of HTTP/3 over QUIC."+config.EndpointHelpSuffixH2)
+ 	portFwCmd.Flags().Bool("insecure", false, "Disable endpoint certificate pinning and trust any certificate")
+ 	portFwCmd.Flags().Bool("always-reconnect", false, "Always reconnect after tunnel loss, even when idle (default behavior in portfw)")
+ 	portFwCmd.Flags().Bool("dont-always-reconnect", false, "Disable always reconnect in portfw; reconnect only when new activity arrives")
+diff --git a/cmd/register.go b/cmd/register.go
+index 7b420b53a8707e6938386552bd9c00951817d73c..d8ff3ccd2d76c1e53d9c106ecd9f828fe7af76e3 100644
+--- a/cmd/register.go
++++ b/cmd/register.go
+@@ -93,8 +93,6 @@ var registerCmd = &cobra.Command{
+ 			EndpointV4: updatedAccountData.Config.Peers[0].Endpoint.V4[:len(updatedAccountData.Config.Peers[0].Endpoint.V4)-2],
+ 			// strip [ from beginning and ]:0 from end
+ 			EndpointV6:     updatedAccountData.Config.Peers[0].Endpoint.V6[1 : len(updatedAccountData.Config.Peers[0].Endpoint.V6)-3],
+-			EndpointH2V4:   config.DefaultEndpointH2V4,
+-			EndpointH2V6:   config.DefaultEndpointH2V6,
+ 			EndpointPubKey: updatedAccountData.Config.Peers[0].PublicKey,
+ 			ID:             updatedAccountData.ID,
+ 			AccessToken:    accountData.Token,
+diff --git a/cmd/socks.go b/cmd/socks.go
+index 26345bdf591ce13f81ec49bdc970fdee073bd77c..94f51ed4ab3e3c14f144df4020018ff7691848ef 100644
+--- a/cmd/socks.go
++++ b/cmd/socks.go
+@@ -90,19 +90,13 @@ var socksCmd = &cobra.Command{
+ 			return
+ 		}
+ 
+-		useHTTP2, err := cmd.Flags().GetBool("http2")
+-		if err != nil {
+-			cmd.Printf("Failed to get HTTP/2 flag: %v\n", err)
+-			return
+-		}
+-
+ 		useIPv6, err := cmd.Flags().GetBool("ipv6")
+ 		if err != nil {
+ 			cmd.Printf("Failed to get ipv6 flag: %v\n", err)
+ 			return
+ 		}
+ 
+-		endpoint, err := config.SelectEndpointFromConfig(useHTTP2, useIPv6, connectPort)
++		endpoint, err := config.SelectEndpointFromConfig(useIPv6, connectPort)
+ 		if err != nil {
+ 			cmd.Printf("Failed to select endpoint: %v\n", err)
+ 			return
+@@ -112,10 +106,6 @@ var socksCmd = &cobra.Command{
+ 			config.WarnInsecure()
+ 		}
+ 
+-		if useHTTP2 {
+-			config.LogHTTP2Endpoint(endpoint)
+-		}
+-
+ 		tunnelIPv4, err := cmd.Flags().GetBool("no-tunnel-ipv4")
+ 		if err != nil {
+ 			cmd.Printf("Failed to get no tunnel IPv4: %v\n", err)
+@@ -257,7 +247,6 @@ var socksCmd = &cobra.Command{
+ 			MTU:               mtu,
+ 			ReconnectDelay:    reconnectDelay,
+ 			AlwaysReconnect:   alwaysReconnect,
+-			UseHTTP2:          useHTTP2,
+ 			OnConnect:         onConnect,
+ 			OnDisconnect:      onDisconnect,
+ 			HookEnv:           hookEnv,
+@@ -312,7 +301,6 @@ func init() {
+ 	socksCmd.Flags().DurationP("reconnect-delay", "r", 1*time.Second, "Delay between reconnect attempts")
+ 	socksCmd.Flags().Duration("udp-timeout", 60*time.Second, "Idle read deadline for each remote UDP relay (SOCKS5 ASSOCIATE). Shorter frees memory sooner; raise (e.g. 300s) if a quiet peer needs longer silence. 0 disables the deadline and risks unbounded growth under DHT/uTP")
+ 	socksCmd.Flags().Bool("always-reconnect", false, "Always reconnect after tunnel loss, even when idle")
+-	socksCmd.Flags().Bool("http2", false, "Use HTTP/2 over TCP+TLS instead of HTTP/3 over QUIC."+config.EndpointHelpSuffixH2)
+ 	socksCmd.Flags().Bool("insecure", false, "Disable endpoint certificate pinning and trust any certificate")
+ 	socksCmd.Flags().BoolP("local-dns", "l", false, "Do not send proxy DNS through the tunnel; use -d over the host instead. Add --system-dns to use the OS resolver instead of -d")
+ 	socksCmd.Flags().Bool("system-dns", false, "With -l, resolve names via the OS (e.g. /etc/resolv.conf) instead of -d")
+diff --git a/config/config.go b/config/config.go
+index 226efe1459185aa02eb81624ea6ca0045c50b1eb..6b687d3186e390b3d8d559336d01d7d68b739fde 100644
+--- a/config/config.go
++++ b/config/config.go
+@@ -15,8 +15,6 @@ type Config struct {
+ 	PrivateKey     string `json:"private_key"`      // Base64-encoded ECDSA private key
+ 	EndpointV4     string `json:"endpoint_v4"`      // IPv4 address of the endpoint
+ 	EndpointV6     string `json:"endpoint_v6"`      // IPv6 address of the endpoint
+-	EndpointH2V4   string `json:"endpoint_h2_v4"`   // IPv4 address used in HTTP/2 mode
+-	EndpointH2V6   string `json:"endpoint_h2_v6"`   // IPv6 address used in HTTP/2 mode
+ 	EndpointPubKey string `json:"endpoint_pub_key"` // PEM-encoded ECDSA public key of the endpoint to verify against
+ 	ID             string `json:"id"`               // Device unique identifier
+ 	AccessToken    string `json:"access_token"`     // Authentication token for API access
+diff --git a/config/endpoints.go b/config/endpoints.go
+index 09185f01c506c2b0f4f30089c9119cb951405c64..2be912c111ae918ef050e4c8dbf792f13f1d6861 100644
+--- a/config/endpoints.go
++++ b/config/endpoints.go
+@@ -6,54 +6,13 @@ import (
+ 	"net"
+ )
+ 
+-const (
+-	HTTP2WikiURL         = "https://github.com/Diniboy1123/usque/wiki/HTTP-2-support"
+-	DefaultEndpointH2V4  = "162.159.198.2"
+-	DefaultEndpointH2V6  = ""
+-	EndpointHelpSuffixH2 = " For details: https://github.com/Diniboy1123/usque/wiki/HTTP-2-support"
+-)
+-
+-// LogHTTP2Endpoint prints the wiki reference and active endpoint when HTTP/2 mode is enabled.
+-func LogHTTP2Endpoint(endpoint net.Addr) {
+-	log.Printf("HTTP/2 mode enabled. See %s", HTTP2WikiURL)
+-	log.Printf("Using HTTP/2 endpoint %s", endpoint.String())
+-}
+-
+ // WarnInsecure prints a warning when certificate pinning is disabled.
+ func WarnInsecure() {
+ 	log.Println("WARNING: --insecure is set, endpoint certificate pinning is disabled. Do not use in production!")
+ }
+ 
+-// SelectEndpointFromConfig returns a protocol-appropriate remote endpoint:
+-// TCP for HTTP/2 mode and UDP for HTTP/3 mode.
+-func SelectEndpointFromConfig(useHTTP2 bool, useIPv6 bool, port int) (net.Addr, error) {
+-	if useHTTP2 {
+-		if useIPv6 {
+-			if AppConfig.EndpointH2V6 == "" {
+-				return nil, fmt.Errorf("--http2 with --ipv6 requires config endpoint_h2_v6 to be set; see %s", HTTP2WikiURL)
+-			}
+-
+-			ip := net.ParseIP(AppConfig.EndpointH2V6)
+-			if ip == nil {
+-				return nil, fmt.Errorf("invalid endpoint_h2_v6 value %q; see %s", AppConfig.EndpointH2V6, HTTP2WikiURL)
+-			}
+-
+-			return &net.TCPAddr{IP: ip, Port: port}, nil
+-		}
+-
+-		v4 := AppConfig.EndpointH2V4
+-		if v4 == "" {
+-			v4 = DefaultEndpointH2V4
+-		}
+-
+-		ip := net.ParseIP(v4)
+-		if ip == nil {
+-			return nil, fmt.Errorf("invalid endpoint_h2_v4 value %q; see %s", v4, HTTP2WikiURL)
+-		}
+-
+-		return &net.TCPAddr{IP: ip, Port: port}, nil
+-	}
+-
++// SelectEndpointFromConfig returns the configured QUIC UDP endpoint.
++func SelectEndpointFromConfig(useIPv6 bool, port int) (net.Addr, error) {
+ 	if useIPv6 {
+ 		ip := net.ParseIP(AppConfig.EndpointV6)
+ 		if ip == nil {

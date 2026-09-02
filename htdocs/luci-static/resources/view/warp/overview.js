@@ -31,7 +31,7 @@ const stateLabels = {
 };
 
 const backendLabels = {
-	usque_masque: _('Standalone patched usque MASQUE')
+	usque_masque: _('WARP MASQUE (QUIC)')
 };
 
 const errorLabels = {
@@ -59,7 +59,6 @@ const errorLabels = {
 	invalid_keepalive: _('The configured keepalive value is invalid.'),
 	invalid_ipv4_setting: _('The IPv4 setting is invalid.'),
 	invalid_ipv6_setting: _('The IPv6 setting is invalid.'),
-	invalid_masque_transport: _('The MASQUE transport setting is invalid.'),
 	invalid_masque_sni: _('The MASQUE SNI hostname is invalid.'),
 	no_address_family: _('Enable at least one address family.'),
 	no_registered_address_for_enabled_family: _('Cloudflare did not return an address for an enabled address family.'),
@@ -221,52 +220,42 @@ return view.extend({
 
 	render: function(data) {
 		const status = data[0] || {};
-		const map = new form.Map('warp', _('Settings'), _('Only the options required to create the standalone interface are shown. Save settings before reconnecting.'));
+		const map = new form.Map('warp', _('Settings'), _('Creates a separate WARP interface without changing routes, DNS or firewall.'));
 		const section = map.section(form.NamedSection, 'main', 'warp');
-		section.tab('general', _('General settings'));
-		section.tab('advanced', _('Advanced settings'));
 
-		let option = section.taboption('general', form.Flag, 'auto_start', _('Start automatically'));
+		let option = section.option(form.Flag, 'auto_start', _('Start automatically'));
 		option.default = option.enabled;
 		option.rmempty = false;
 
-		option = section.taboption('general', form.Value, 'interface', _('Preferred interface name'));
+		option = section.option(form.Value, 'interface', _('Preferred interface name'));
 		option.default = 'warp';
 		option.rmempty = false;
 		option.validate = function(sectionId, value) {
 			return /^[A-Za-z_][A-Za-z0-9_]{0,14}$/.test(value) ? true : _('Use 1–15 letters, digits or underscores; the first character must not be a digit.');
 		};
 
-		option = section.taboption('general', form.Value, 'mtu', _('MTU'));
+		option = section.option(form.Value, 'mtu', _('MTU'));
 		option.datatype = 'range(576,9000)';
 		option.default = '1280';
 		option.rmempty = false;
 
-		option = section.taboption('general', form.Value, 'keepalive', _('Persistent keepalive'));
+		option = section.option(form.Value, 'keepalive', _('Persistent keepalive'));
 		option.datatype = 'range(0,65535)';
 		option.default = '5';
 		option.rmempty = false;
 
-		option = section.taboption('general', form.Flag, 'ipv4', _('Use IPv4'));
+		option = section.option(form.Flag, 'ipv4', _('Use IPv4'));
 		option.default = option.enabled;
 		option.rmempty = false;
 
-		option = section.taboption('general', form.Flag, 'ipv6', _('Use IPv6 when available'));
+		option = section.option(form.Flag, 'ipv6', _('Use IPv6 when available'));
 		option.default = option.enabled;
 		option.rmempty = false;
 
-		option = section.taboption('advanced', form.ListValue, 'masque_transport', _('MASQUE transport'));
-		option.value('auto', _('Automatic fallback (QUIC → HTTP/2)'));
-		option.value('quic', _('QUIC / HTTP/3'));
-		option.value('http2', _('TCP / HTTP/2'));
-		option.default = 'quic';
-		option.rmempty = false;
-		option.description = _('QUIC is recommended when it works on your network. Automatic mode switches to HTTP/2 only after three consecutive QUIC connection failures.');
-
-		option = section.taboption('advanced', form.Value, 'masque_sni', _('QUIC SNI'));
+		option = section.option(form.Value, 'masque_sni', _('QUIC SNI'));
 		option.placeholder = 'ozon.ru';
 		option.optional = true;
-		option.description = _('Hostname used as TLS SNI for QUIC/HTTP3 masking. HTTP/2 always uses the canonical Cloudflare MASQUE SNI for a reliable data plane. Empty uses ozon.ru. The endpoint remains authenticated by its pinned public key.');
+		option.description = _('TLS hostname used to mask the QUIC connection. Empty uses ozon.ru; the server is still verified by its pinned public key.');
 		option.validate = function(sectionId, value) {
 			if (!value)
 				return true;
@@ -279,7 +268,7 @@ return view.extend({
 			const content = [
 				E('h2', {}, _('Cloudflare WARP')),
 				E('div', { 'class': 'cbi-section' }, [
-					E('p', {}, _('This application creates a separate userspace WARP tunnel through its dedicated MASQUE backend. It does not change firewall, DNS, the default route, or policy routing. Existing traffic continues to use WAN.')),
+					E('p', {}, _('Traffic uses WAN until you select this interface in your routing configuration.')),
 					this.renderStatus(status),
 					this.renderActions(status)
 				])
