@@ -1,0 +1,589 @@
+diff --git a/api/masque_h2.go b/api/masque_h2.go
+index 3f87fba..9963459 100644
+--- a/api/masque_h2.go
++++ b/api/masque_h2.go
+@@ -232,6 +232,7 @@ func encodeH2ConnectHeaders(u *url.URL) ([]byte, error) {
+ 	fields := []hpack.HeaderField{
+ 		{Name: ":method", Value: http.MethodConnect},
+ 		{Name: ":authority", Value: h2Authority(u)},
++		{Name: "capsule-protocol", Value: "?1"},
+ 		{Name: "user-agent", Value: ""},
+ 		{Name: "cf-connect-proto", Value: "cf-connect-ip"},
+ 		{Name: "pq-enabled", Value: "false"},
+@@ -461,6 +462,13 @@ type rawH2PacketConn struct {
+ }
+ 
+ func (c *rawH2PacketConn) ReadPacketZeroCopy(_ bool) ([]byte, error) {
++	return c.readPacket(context.Background())
++}
++
++// readPacket is the context-aware variant used while verifying an HTTP/2
++// endpoint. It avoids leaving a background reader behind to steal the first
++// real packet after a probe timeout or success.
++func (c *rawH2PacketConn) readPacket(ctx context.Context) ([]byte, error) {
+ 	for {
+ 		if capsuleType, payload, consumed, ok, err := parseH2Capsule(c.readBuf); err != nil {
+ 			return nil, err
+@@ -476,7 +484,13 @@ func (c *rawH2PacketConn) ReadPacketZeroCopy(_ bool) ([]byte, error) {
+ 			return packet, nil
+ 		}
+ 
+-		chunk, ok := <-c.stream.recvCh
++		var chunk []byte
++		var ok bool
++		select {
++		case chunk, ok = <-c.stream.recvCh:
++		case <-ctx.Done():
++			return nil, context.Cause(ctx)
++		}
+ 		if !ok {
+ 			select {
+ 			case err := <-c.stream.errCh:
+diff --git a/api/masque_h2_probe.go b/api/masque_h2_probe.go
+new file mode 100644
+index 0000000..ce1dba4
+--- /dev/null
++++ b/api/masque_h2_probe.go
+@@ -0,0 +1,253 @@
++package api
++
++import (
++	"context"
++	"crypto/tls"
++	"encoding/binary"
++	"errors"
++	"fmt"
++	"log"
++	"net"
++	"net/http"
++	"time"
++
++	"github.com/Diniboy1123/usque/internal"
++	"github.com/quic-go/quic-go/http3"
++)
++
++const (
++	h2ProbeDestination      = "1.1.1.1"
++	h2ProbeAttempts         = 3
++	h2ProbeRepliesRequired  = 2
++	h2CandidateTimeout      = 4 * time.Second
++	h2CandidateParallelism  = 10
++	h2ProbeICMPEchoReply    = 0
++	h2ProbeICMPUnreachable  = 3
++	h2ProbeICMPTimeExceeded = 11
++	h2ProbeICMPIdentifier   = 0x5741
++	h2ProbePayloadLength    = 16
++)
++
++var h2ProbeDestinationIP = net.IPv4(1, 1, 1, 1).To4()
++
++type h2CandidateResult struct {
++	endpoint net.Addr
++	conn     PacketConnection
++	response *http.Response
++	err      error
++}
++
++func connectSupervisorTunnel(ctx context.Context, cfg MaintainTunnelConfig, endpoint net.Addr, useHTTP2 bool) (*net.UDPConn, *http3.Transport, PacketConnection, *http.Response, net.Addr, error) {
++	if !useHTTP2 {
++		udpConn, transport, conn, response, err := ConnectTunnel(
++			ctx,
++			cfg.TLSConfig,
++			internal.DefaultQuicConfig(cfg.KeepalivePeriod, cfg.InitialPacketSize),
++			internal.ConnectURI,
++			endpoint,
++			false,
++		)
++		return udpConn, transport, conn, response, endpoint, err
++	}
++
++	candidates := make([]net.Addr, 0, len(cfg.HTTP2Endpoints)+1)
++	candidates = append(candidates, endpoint)
++	candidates = append(candidates, cfg.HTTP2Endpoints...)
++	conn, response, selected, err := connectVerifiedHTTP2(ctx, cfg.TLSConfig, internal.ConnectURI, candidates, cfg.HTTP2ProbeIPv4)
++	return nil, nil, conn, response, selected, err
++}
++
++// connectVerifiedHTTP2 tests the configured endpoint first and only fans out
++// across the sampled Cloudflare pool if that endpoint accepts CONNECT but does
++// not carry real IP traffic. The probe requires multiple echo replies, which
++// rejects the observed failure mode where one packet passes and the endpoint
++// immediately returns an administrative ICMP error.
++func connectVerifiedHTTP2(ctx context.Context, tlsConfig *tls.Config, connectURI string, candidates []net.Addr, sourceIPv4 net.IP) (PacketConnection, *http.Response, net.Addr, error) {
++	ordered := uniqueHTTPEndpoints(candidates)
++	if len(ordered) == 0 {
++		return nil, nil, nil, errors.New("no HTTP/2 endpoints to verify")
++	}
++	if sourceIPv4.To4() == nil {
++		return nil, nil, nil, errors.New("HTTP/2 data-plane verification requires a valid tunnel IPv4 address")
++	}
++
++	first, attempts := runHTTP2CandidateBatch(ctx, tlsConfig, connectURI, ordered[:1], sourceIPv4)
++	if first.err == nil {
++		return first.conn, first.response, first.endpoint, nil
++	}
++	lastErr := first.err
++	log.Printf("HTTP/2 endpoint %s failed data-plane verification: %v; scanning %d alternate endpoint/port pairs", ordered[0], first.err, len(ordered)-1)
++
++	for start := 1; start < len(ordered); start += h2CandidateParallelism {
++		end := start + h2CandidateParallelism
++		if end > len(ordered) {
++			end = len(ordered)
++		}
++		winner, tried := runHTTP2CandidateBatch(ctx, tlsConfig, connectURI, ordered[start:end], sourceIPv4)
++		attempts += tried
++		if winner.err == nil {
++			log.Printf("Selected verified HTTP/2 endpoint %s after %d candidates", winner.endpoint, attempts)
++			return winner.conn, winner.response, winner.endpoint, nil
++		}
++		lastErr = winner.err
++		if ctx.Err() != nil {
++			return nil, nil, nil, context.Cause(ctx)
++		}
++	}
++
++	return nil, nil, nil, fmt.Errorf("no HTTP/2 endpoint passed the IP data-plane probe after %d candidates: %w", attempts, lastErr)
++}
++
++func runHTTP2CandidateBatch(ctx context.Context, tlsConfig *tls.Config, connectURI string, candidates []net.Addr, sourceIPv4 net.IP) (h2CandidateResult, int) {
++	batchCtx, cancel := context.WithCancel(ctx)
++	defer cancel()
++	results := make(chan h2CandidateResult, len(candidates))
++	for _, endpoint := range candidates {
++		go func(endpoint net.Addr) {
++			results <- probeHTTP2Candidate(batchCtx, tlsConfig, connectURI, endpoint, sourceIPv4)
++		}(endpoint)
++	}
++
++	winner := h2CandidateResult{err: errors.New("HTTP/2 candidate batch failed")}
++	for range candidates {
++		result := <-results
++		if result.err == nil && winner.conn == nil {
++			winner = result
++			cancel()
++			continue
++		}
++		if result.conn != nil {
++			_ = result.conn.Close()
++		}
++		if winner.conn == nil && result.err != nil {
++			winner.err = result.err
++		}
++	}
++	return winner, len(candidates)
++}
++
++func probeHTTP2Candidate(ctx context.Context, tlsConfig *tls.Config, connectURI string, endpoint net.Addr, sourceIPv4 net.IP) h2CandidateResult {
++	result := h2CandidateResult{endpoint: endpoint}
++	tcpEndpoint, ok := endpoint.(*net.TCPAddr)
++	if !ok || tcpEndpoint == nil {
++		result.err = fmt.Errorf("HTTP/2 candidate %T is not a TCP endpoint", endpoint)
++		return result
++	}
++
++	attemptCtx, cancel := context.WithTimeout(ctx, h2CandidateTimeout)
++	defer cancel()
++	result.conn, result.response, result.err = connectTunnelHTTP2(attemptCtx, tlsConfig, tcpEndpoint, connectURI)
++	if result.err != nil {
++		return result
++	}
++	if result.response == nil || result.response.StatusCode != http.StatusOK {
++		result.err = fmt.Errorf("CONNECT returned %v", result.response)
++		return result
++	}
++	if result.err = verifyHTTP2DataPlane(attemptCtx, result.conn, sourceIPv4); result.err != nil {
++		return result
++	}
++	return result
++}
++
++func verifyHTTP2DataPlane(ctx context.Context, conn PacketConnection, sourceIPv4 net.IP) error {
++	raw, ok := conn.(*rawH2PacketConn)
++	if !ok {
++		return fmt.Errorf("unsupported HTTP/2 packet connection %T", conn)
++	}
++	for sequence := uint16(1); sequence <= h2ProbeAttempts; sequence++ {
++		packet := buildHTTP2ProbePacket(sourceIPv4, h2ProbeICMPIdentifier, sequence)
++		buffer := make([]byte, len(packet)+datagramContextIDHeadroom)
++		copy(buffer[datagramContextIDHeadroom:], packet)
++		if _, err := conn.WritePacketBuffer(buffer, datagramContextIDHeadroom, len(packet)); err != nil {
++			return fmt.Errorf("send probe: %w", err)
++		}
++	}
++
++	replies := 0
++	for replies < h2ProbeRepliesRequired {
++		packet, err := raw.readPacket(ctx)
++		if err != nil {
++			return fmt.Errorf("receive probe (%d/%d replies): %w", replies, h2ProbeRepliesRequired, err)
++		}
++		matched, failure := classifyHTTP2ProbePacket(packet, sourceIPv4, h2ProbeICMPIdentifier)
++		if failure != nil {
++			return failure
++		}
++		if matched {
++			replies++
++		}
++	}
++	return nil
++}
++
++func buildHTTP2ProbePacket(sourceIPv4 net.IP, identifier, sequence uint16) []byte {
++	packet := make([]byte, minimumIPv4HeaderLength+8+h2ProbePayloadLength)
++	packet[0] = 0x45
++	binary.BigEndian.PutUint16(packet[2:4], uint16(len(packet)))
++	binary.BigEndian.PutUint16(packet[4:6], sequence)
++	packet[6] = 0x40
++	packet[8] = 64
++	packet[9] = 1
++	copy(packet[12:16], sourceIPv4.To4())
++	copy(packet[16:20], h2ProbeDestinationIP)
++	binary.BigEndian.PutUint16(packet[10:12], ipv4HeaderChecksum(packet[:minimumIPv4HeaderLength]))
++
++	icmp := packet[minimumIPv4HeaderLength:]
++	icmp[0] = 8
++	binary.BigEndian.PutUint16(icmp[4:6], identifier)
++	binary.BigEndian.PutUint16(icmp[6:8], sequence)
++	copy(icmp[8:], []byte("CFWARP-H2-PROBE"))
++	binary.BigEndian.PutUint16(icmp[2:4], internetChecksum(icmp))
++	return packet
++}
++
++func classifyHTTP2ProbePacket(packet []byte, sourceIPv4 net.IP, identifier uint16) (bool, error) {
++	if len(packet) < minimumIPv4HeaderLength || packet[0]>>4 != 4 || packet[9] != 1 {
++		return false, nil
++	}
++	headerLength := int(packet[0]&0x0f) * 4
++	if headerLength < minimumIPv4HeaderLength || len(packet) < headerLength+8 {
++		return false, nil
++	}
++	icmp := packet[headerLength:]
++	if icmp[0] == h2ProbeICMPEchoReply && icmp[1] == 0 && binary.BigEndian.Uint16(icmp[4:6]) == identifier && net.IP(packet[12:16]).Equal(h2ProbeDestinationIP) && net.IP(packet[16:20]).Equal(sourceIPv4.To4()) {
++		return true, nil
++	}
++	if icmp[0] == h2ProbeICMPUnreachable || icmp[0] == h2ProbeICMPTimeExceeded {
++		return false, fmt.Errorf("HTTP/2 data plane returned ICMP type %d code %d", icmp[0], icmp[1])
++	}
++	return false, nil
++}
++
++func internetChecksum(data []byte) uint16 {
++	var sum uint32
++	for len(data) >= 2 {
++		sum += uint32(binary.BigEndian.Uint16(data[:2]))
++		data = data[2:]
++	}
++	if len(data) == 1 {
++		sum += uint32(data[0]) << 8
++	}
++	for sum>>16 != 0 {
++		sum = (sum & 0xffff) + (sum >> 16)
++	}
++	return ^uint16(sum)
++}
++
++func uniqueHTTPEndpoints(candidates []net.Addr) []net.Addr {
++	result := make([]net.Addr, 0, len(candidates))
++	seen := make(map[string]struct{}, len(candidates))
++	for _, candidate := range candidates {
++		if candidate == nil {
++			continue
++		}
++		key := candidate.Network() + ":" + candidate.String()
++		if _, exists := seen[key]; exists {
++			continue
++		}
++		seen[key] = struct{}{}
++		result = append(result, candidate)
++	}
++	return result
++}
+diff --git a/api/masque_h2_probe_test.go b/api/masque_h2_probe_test.go
+new file mode 100644
+index 0000000..9e57674
+--- /dev/null
++++ b/api/masque_h2_probe_test.go
+@@ -0,0 +1,44 @@
++package api
++
++import (
++	"encoding/binary"
++	"net"
++	"testing"
++)
++
++func TestHTTP2ProbePacketHasValidChecksums(t *testing.T) {
++	packet := buildHTTP2ProbePacket(net.IPv4(172, 16, 0, 2), h2ProbeICMPIdentifier, 2)
++	if got := internetChecksum(packet[:minimumIPv4HeaderLength]); got != 0 {
++		t.Fatalf("IPv4 checksum = %#x", got)
++	}
++	if got := internetChecksum(packet[minimumIPv4HeaderLength:]); got != 0 {
++		t.Fatalf("ICMP checksum = %#x", got)
++	}
++}
++
++func TestClassifyHTTP2ProbeReplyAndAdministrativeError(t *testing.T) {
++	source := net.IPv4(172, 16, 0, 2)
++	reply := buildHTTP2ProbePacket(h2ProbeDestinationIP, h2ProbeICMPIdentifier, 1)
++	copy(reply[16:20], source.To4())
++	reply[minimumIPv4HeaderLength] = h2ProbeICMPEchoReply
++	reply[10], reply[11] = 0, 0
++	binary.BigEndian.PutUint16(reply[10:12], ipv4HeaderChecksum(reply[:minimumIPv4HeaderLength]))
++	if matched, err := classifyHTTP2ProbePacket(reply, source, h2ProbeICMPIdentifier); !matched || err != nil {
++		t.Fatalf("echo reply: matched=%v err=%v", matched, err)
++	}
++
++	reply[minimumIPv4HeaderLength] = h2ProbeICMPUnreachable
++	reply[minimumIPv4HeaderLength+1] = 13
++	if matched, err := classifyHTTP2ProbePacket(reply, source, h2ProbeICMPIdentifier); matched || err == nil {
++		t.Fatalf("administrative reject: matched=%v err=%v", matched, err)
++	}
++}
++
++func TestUniqueHTTPEndpointsPreservesOrder(t *testing.T) {
++	one := &net.TCPAddr{IP: net.IPv4(162, 159, 198, 2), Port: 443}
++	two := &net.TCPAddr{IP: net.IPv4(162, 159, 199, 2), Port: 443}
++	got := uniqueHTTPEndpoints([]net.Addr{one, one, nil, two})
++	if len(got) != 2 || got[0].String() != one.String() || got[1].String() != two.String() {
++		t.Fatalf("unexpected endpoints: %v", got)
++	}
++}
+diff --git a/api/masque_h2_test.go b/api/masque_h2_test.go
+index b2df6e1..0717f4f 100644
+--- a/api/masque_h2_test.go
++++ b/api/masque_h2_test.go
+@@ -58,6 +58,7 @@ func TestEncodeH2ConnectHeadersUsesCloudflarePlainConnect(t *testing.T) {
+ 	for name, expected := range map[string]string{
+ 		":method":          "CONNECT",
+ 		":authority":       "cloudflareaccess.com:443",
++		"capsule-protocol": "?1",
+ 		"cf-connect-proto": "cf-connect-ip",
+ 		"pq-enabled":       "false",
+ 	} {
+@@ -65,7 +66,7 @@ func TestEncodeH2ConnectHeadersUsesCloudflarePlainConnect(t *testing.T) {
+ 			t.Fatalf("header %s: got %q, want %q", name, got[name], expected)
+ 		}
+ 	}
+-	for _, forbidden := range []string{":scheme", ":path", ":protocol", "capsule-protocol"} {
++	for _, forbidden := range []string{":scheme", ":path", ":protocol"} {
+ 		if _, exists := got[forbidden]; exists {
+ 			t.Fatalf("plain CONNECT must not include %s", forbidden)
+ 		}
+diff --git a/api/tunnel.go b/api/tunnel.go
+index 43f0e6c..5010192 100644
+--- a/api/tunnel.go
++++ b/api/tunnel.go
+@@ -11,7 +11,6 @@ import (
+ 	"time"
+ 
+ 	connectip "github.com/Diniboy1123/connect-ip-go"
+-	"github.com/Diniboy1123/usque/internal"
+ 	"github.com/songgao/water"
+ 	"golang.zx2c4.com/wireguard/tun"
+ )
+@@ -181,11 +180,17 @@ type MaintainTunnelConfig struct {
+ 	// establishment failures. An established QUIC tunnel is reconnected as QUIC
+ 	// after a remote idle disconnect instead of being treated as a blocked path.
+ 	HTTP2FallbackEndpoint net.Addr
+-	Device                TunnelDevice
+-	MTU                   int
+-	ReconnectDelay        time.Duration
+-	AlwaysReconnect       bool
+-	UseHTTP2              bool
++	// HTTP2Endpoints contains alternate Cloudflare endpoint/port pairs. The
++	// supervisor verifies their IP data plane before exposing a connection.
++	HTTP2Endpoints []net.Addr
++	// HTTP2ProbeIPv4 is the registered inner address used for the verification
++	// echo packets; it never leaves the encrypted CONNECT-IP tunnel.
++	HTTP2ProbeIPv4  net.IP
++	Device          TunnelDevice
++	MTU             int
++	ReconnectDelay  time.Duration
++	AlwaysReconnect bool
++	UseHTTP2        bool
+ 	// OnConnect is a path to an executable run after every successful tunnel
+ 	// connect. It is exec'd directly (no shell, no args) and runs fire-and-forget.
+ 	OnConnect string
+@@ -344,14 +349,7 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
+ 		}
+ 
+ 		log.Printf("Establishing MASQUE connection to %s", activeEndpoint)
+-		udpConn, tr, ipConn, rsp, err := ConnectTunnel(
+-			ctx,
+-			cfg.TLSConfig,
+-			internal.DefaultQuicConfig(cfg.KeepalivePeriod, cfg.InitialPacketSize),
+-			internal.ConnectURI,
+-			activeEndpoint,
+-			useHTTP2,
+-		)
++		udpConn, tr, ipConn, rsp, selectedEndpoint, err := connectSupervisorTunnel(ctx, cfg, activeEndpoint, useHTTP2)
+ 		if err != nil {
+ 			log.Printf("Failed to connect tunnel: %v", err)
+ 			if ipConn != nil {
+@@ -372,6 +370,7 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
+ 			}
+ 			continue
+ 		}
++		activeEndpoint = selectedEndpoint
+ 		if rsp.StatusCode != 200 {
+ 			log.Printf("Tunnel connection failed: %s", rsp.Status)
+ 			_ = ipConn.Close()
+diff --git a/cmd/nativetun.go b/cmd/nativetun.go
+index cecfc95..0c2168c 100644
+--- a/cmd/nativetun.go
++++ b/cmd/nativetun.go
+@@ -118,6 +118,20 @@ var nativeTunCmd = &cobra.Command{
+ 			}
+ 			log.Printf("Adaptive transport enabled. HTTP/2 fallback endpoint: %s", http2FallbackEndpoint)
+ 		}
++		var http2Endpoints []net.Addr
++		var http2ProbeIPv4 net.IP
++		if useHTTP2 || http2Fallback {
++			primaryHTTP2Endpoint := endpoint
++			if http2FallbackEndpoint != nil {
++				primaryHTTP2Endpoint = http2FallbackEndpoint
++			}
++			http2Endpoints = config.HTTP2EndpointCandidates(primaryHTTP2Endpoint, useIPv6, config.AppConfig.ID)
++			http2ProbeIPv4 = net.ParseIP(config.AppConfig.IPv4)
++			if http2ProbeIPv4 == nil || http2ProbeIPv4.To4() == nil {
++				cmd.Printf("Failed to prepare HTTP/2 data-plane probe: invalid tunnel IPv4 %q\n", config.AppConfig.IPv4)
++				return
++			}
++		}
+ 
+ 		if insecure {
+ 			config.WarnInsecure()
+@@ -228,6 +242,8 @@ var nativeTunCmd = &cobra.Command{
+ 			InitialPacketSize:     initialPacketSize,
+ 			Endpoint:              endpoint,
+ 			HTTP2FallbackEndpoint: http2FallbackEndpoint,
++			HTTP2Endpoints:        http2Endpoints,
++			HTTP2ProbeIPv4:        http2ProbeIPv4,
+ 			Device:                dev,
+ 			MTU:                   mtu,
+ 			ReconnectDelay:        reconnectDelay,
+diff --git a/config/endpoints_h2_pool.go b/config/endpoints_h2_pool.go
+new file mode 100644
+index 0000000..b971b3e
+--- /dev/null
++++ b/config/endpoints_h2_pool.go
+@@ -0,0 +1,69 @@
++package config
++
++import (
++	"hash/fnv"
++	"math/rand"
++	"net"
++	"time"
++)
++
++var cloudflareHTTP2Ports = []int{443, 500, 1701, 4500, 4443, 8443, 8095}
++
++const http2SamplesPerIPv4Pool = 5
++
++// HTTP2EndpointCandidates returns the configured endpoint first, followed by a
++// small randomized sample from Cloudflare's two HTTP/2 anycast pools and all
++// known MASQUE ports. A successful CONNECT is not sufficient for this service:
++// some endpoint/port pairs accept the session but silently drop the IP data
++// plane, so the caller must verify candidates from the returned list.
++func HTTP2EndpointCandidates(primary net.Addr, useIPv6 bool, deviceID string) []net.Addr {
++	if primary == nil || useIPv6 {
++		return []net.Addr{primary}
++	}
++	primaryTCP, ok := primary.(*net.TCPAddr)
++	if !ok || primaryTCP.IP.To4() == nil {
++		return []net.Addr{primary}
++	}
++
++	h := fnv.New64a()
++	_, _ = h.Write([]byte(deviceID))
++	seed := int64(h.Sum64() ^ uint64(time.Now().UnixNano()))
++	return http2IPv4EndpointCandidates(primaryTCP, seed)
++}
++
++func http2IPv4EndpointCandidates(primary *net.TCPAddr, seed int64) []net.Addr {
++	result := make([]net.Addr, 0, 1+2*http2SamplesPerIPv4Pool*len(cloudflareHTTP2Ports))
++	seen := make(map[string]struct{}, cap(result))
++	appendCandidate := func(ip net.IP, port int) {
++		candidate := &net.TCPAddr{IP: append(net.IP(nil), ip...), Port: port}
++		key := candidate.String()
++		if _, exists := seen[key]; exists {
++			return
++		}
++		seen[key] = struct{}{}
++		result = append(result, candidate)
++	}
++
++	appendCandidate(primary.IP, primary.Port)
++	rng := rand.New(rand.NewSource(seed))
++	for _, thirdOctet := range []byte{198, 199} {
++		for _, hostOffset := range rng.Perm(254)[:http2SamplesPerIPv4Pool] {
++			ip := net.IPv4(162, 159, thirdOctet, byte(hostOffset+1))
++			for _, port := range preferredHTTP2Ports(primary.Port) {
++				appendCandidate(ip, port)
++			}
++		}
++	}
++	return result
++}
++
++func preferredHTTP2Ports(primary int) []int {
++	ports := make([]int, 0, len(cloudflareHTTP2Ports)+1)
++	ports = append(ports, primary)
++	for _, port := range cloudflareHTTP2Ports {
++		if port != primary {
++			ports = append(ports, port)
++		}
++	}
++	return ports
++}
+diff --git a/config/endpoints_h2_pool_test.go b/config/endpoints_h2_pool_test.go
+new file mode 100644
+index 0000000..d558373
+--- /dev/null
++++ b/config/endpoints_h2_pool_test.go
+@@ -0,0 +1,44 @@
++package config
++
++import (
++	"net"
++	"testing"
++)
++
++func TestHTTP2IPv4CandidatesKeepPrimaryAndCoverBothPools(t *testing.T) {
++	primary := &net.TCPAddr{IP: net.IPv4(162, 159, 198, 2), Port: 443}
++	candidates := http2IPv4EndpointCandidates(primary, 42)
++	maximum := 1 + 2*http2SamplesPerIPv4Pool*len(cloudflareHTTP2Ports)
++	if len(candidates) < maximum-1 || len(candidates) > maximum {
++		t.Fatalf("candidate count: got %d", len(candidates))
++	}
++	if candidates[0].String() != primary.String() {
++		t.Fatalf("first candidate: got %s, want %s", candidates[0], primary)
++	}
++
++	seen := make(map[string]bool, len(candidates))
++	pools := map[byte]bool{}
++	for _, endpoint := range candidates {
++		if seen[endpoint.String()] {
++			t.Fatalf("duplicate endpoint %s", endpoint)
++		}
++		seen[endpoint.String()] = true
++		tcp := endpoint.(*net.TCPAddr)
++		v4 := tcp.IP.To4()
++		if v4 == nil || v4[0] != 162 || v4[1] != 159 || (v4[2] != 198 && v4[2] != 199) {
++			t.Fatalf("endpoint outside Cloudflare HTTP/2 pools: %s", endpoint)
++		}
++		pools[v4[2]] = true
++	}
++	if !pools[198] || !pools[199] {
++		t.Fatalf("both pools were not sampled: %v", pools)
++	}
++}
++
++func TestHTTP2IPv6CandidatesStayPinned(t *testing.T) {
++	primary := &net.TCPAddr{IP: net.ParseIP("2606:4700:103::2"), Port: 443}
++	candidates := HTTP2EndpointCandidates(primary, true, "device")
++	if len(candidates) != 1 || candidates[0].String() != primary.String() {
++		t.Fatalf("unexpected IPv6 candidates: %v", candidates)
++	}
++}
