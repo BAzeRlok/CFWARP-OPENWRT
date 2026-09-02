@@ -1,0 +1,38 @@
+diff --git a/api/tunnel.go b/api/tunnel.go
+index b99ebe91617b81422cc789b0fcd432d65150cc68..8d0eb3d43714efc9e60a1949f33a785e906be21e 100644
+--- a/api/tunnel.go
++++ b/api/tunnel.go
+@@ -153,9 +153,12 @@ const (
+ 	// forwarding pumps to exit after an error before reconnecting.
+ 	pumpShutdownGrace = 2 * time.Second
+-	// devicePacketQueueSize keeps a small amount of outbound traffic while the
+-	// MASQUE transport reconnects. A single persistent TUN reader prevents stale
+-	// readers from stealing packets after a reconnect.
+-	devicePacketQueueSize = 64
++	// devicePacketQueueSize keeps exactly the packet which triggered a reconnect.
++	// quic-go already has its own bounded DATAGRAM queue. Buffering another large
++	// FIFO here creates seconds of head-of-line delay when the outer QUIC path is
++	// lossy or congested. Let the TUN qdisc provide backpressure and fair queueing
++	// instead of draining it into userspace. A single persistent TUN reader still
++	// prevents stale readers from stealing packets across reconnects.
++	devicePacketQueueSize = 1
+ 	// autoFallbackConnectFailures avoids abandoning a working QUIC path after a
+ 	// normal remote idle disconnect or one transient handshake failure.
+ 	autoFallbackConnectFailures = 3
+diff --git a/api/tunnel_fallback_test.go b/api/tunnel_fallback_test.go
+index 5c697615038c6813620cdabf59a50cfe7267e67c..a6d086182df7a11af6f19205f7a1feac7a27f29e 100644
+--- a/api/tunnel_fallback_test.go
++++ b/api/tunnel_fallback_test.go
+@@ -62,6 +62,12 @@ func TestHTTP2FallbackWaitsForRepeatedConnectionFailures(t *testing.T) {
+ 	}
+ }
+ 
++func TestDevicePacketQueueStaysLowLatency(t *testing.T) {
++	if devicePacketQueueSize != 1 {
++		t.Fatalf("unexpected device packet queue size: got %d, want 1", devicePacketQueueSize)
++	}
++}
++
+ func TestDevicePacketReaderPreservesPacketsAcrossConsumers(t *testing.T) {
+ 	ctx, cancel := context.WithCancel(context.Background())
+ 	defer cancel()

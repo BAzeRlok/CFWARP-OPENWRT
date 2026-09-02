@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=warp-usque
 PKG_VERSION:=4.2.1
-PKG_RELEASE:=4
+PKG_RELEASE:=5
 
 PKG_SOURCE:=usque-$(PKG_VERSION).tar.gz
 PKG_SOURCE_URL:=https://codeload.github.com/Diniboy1123/usque/tar.gz/refs/tags/v$(PKG_VERSION)?

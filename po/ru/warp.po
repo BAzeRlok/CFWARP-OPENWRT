@@ -1,6 +1,6 @@
 msgid ""
 msgstr ""
-"Project-Id-Version: luci-app-warp 1.7.1\n"
+"Project-Id-Version: luci-app-warp 1.7.2\n"
 "PO-Revision-Date: 2026-09-02 00:00+0300\n"
 "Last-Translator: luci-app-warp contributors\n"
 "Language-Team: Russian\n"

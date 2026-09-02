@@ -105,6 +105,7 @@ class PackageTests(unittest.TestCase):
         transport_fix = (ROOT / "warp-usque/patches/120-transport-stability.patch").read_text(encoding="utf-8")
         http2_fix = (ROOT / "warp-usque/patches/130-http2-raw-connect.patch").read_text(encoding="utf-8")
         alpn_fix = (ROOT / "warp-usque/patches/140-http2-prior-knowledge.patch").read_text(encoding="utf-8")
+        latency_fix = (ROOT / "warp-usque/patches/150-low-latency-queue.patch").read_text(encoding="utf-8")
         self.assertIn('USQUE_BIN="${WARP_USQUE_BIN:-/usr/libexec/warp-usque}"', manager)
         self.assertIn("set warp.main.actual_backend='usque_masque'", manager)
         self.assertIn('usque_profile_valid "$temp_usque_config"', manager)
@@ -114,7 +115,7 @@ class PackageTests(unittest.TestCase):
         self.assertNotIn("/etc/config/zapret", manager + init)
         self.assertNotIn("/opt/zapret", manager + init)
         self.assertIn("PKG_VERSION:=4.2.1", package)
-        self.assertIn("PKG_RELEASE:=4", package)
+        self.assertIn("PKG_RELEASE:=5", package)
         self.assertIn("PKG_HASH:=cd0e9c89353915cb74a0877ab6fc68ee158adf8724ef9aab878a4d90edcb1d72", package)
         self.assertIn("HelloChrome_Auto", patch)
         self.assertIn("forceHTTP1ALPN", patch)
@@ -137,6 +138,8 @@ class PackageTests(unittest.TestCase):
         self.assertNotIn("+\t\tipConn, rsp, err := connectip.DialH2", http2_fix)
         self.assertIn('return protocol == "" || protocol == "h2"', alpn_fix)
         self.assertIn("TestHTTP2ALPNAcceptsPriorKnowledge", alpn_fix)
+        self.assertIn("devicePacketQueueSize = 1", latency_fix)
+        self.assertIn("TestDevicePacketQueueStaysLowLatency", latency_fix)
         self.assertNotIn("--insecure", init)
 
     def test_runtime_start_reports_the_failed_phase(self):
@@ -186,7 +189,7 @@ class PackageTests(unittest.TestCase):
         makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
         self.assertIn("LUCI_PKGARCH:=all", makefile)
         self.assertIn("LUCI_NAME:=luci-app-warp", makefile)
-        self.assertIn("LUCI_EXTRA_DEPENDS:=kmod-tun (>=0), warp-usque (>=4.2.1-r4)", makefile)
+        self.assertIn("LUCI_EXTRA_DEPENDS:=kmod-tun (>=0), warp-usque (>=4.2.1-r5)", makefile)
         self.assertNotIn("+kmod-tun", makefile)
         self.assertNotIn("+warp-usque", makefile)
         self.assertNotIn("+wireguard-tools", makefile)
@@ -199,10 +202,10 @@ class PackageTests(unittest.TestCase):
     def test_installer_selects_supported_arm64_package(self):
         installer = (ROOT / "install.sh").read_text(encoding="utf-8")
         self.assertIn("aarch64|aarch64_cortex-a53)", installer)
-        self.assertIn('USQUE_PACKAGE="warp-usque-4.2.1-r4-$ARCH.apk"', installer)
+        self.assertIn('USQUE_PACKAGE="warp-usque-4.2.1-r5-$ARCH.apk"', installer)
         self.assertIn("DISTRIB_ARCH", installer)
         self.assertIn("OPENWRT_ARCH", installer)
-        self.assertIn('RELEASE_TAG="v1.7.1"', installer)
+        self.assertIn('RELEASE_TAG="v1.7.2"', installer)
         self.assertIn('TRANSPORT="${WARP_TRANSPORT:-quic}"', installer)
         self.assertIn("auto|quic|http2", installer)
 
