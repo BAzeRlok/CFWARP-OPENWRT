@@ -1,0 +1,52 @@
+diff --git a/api/masque_h2.go b/api/masque_h2.go
+index 11461cf..dfb0ac2 100644
+--- a/api/masque_h2.go
++++ b/api/masque_h2.go
+@@ -90,9 +90,10 @@ func connectTunnelHTTP2(ctx context.Context, baseTLSConfig *tls.Config, endpoint
+ 		_ = conn.Close()
+ 		return nil, nil, err
+ 	}
+-	if tlsConn.ConnectionState().NegotiatedProtocol != "h2" {
++	negotiatedProtocol := tlsConn.ConnectionState().NegotiatedProtocol
++	if !http2ALPNAccepted(negotiatedProtocol) {
+ 		_ = conn.Close()
+-		return nil, nil, fmt.Errorf("HTTP/2 endpoint negotiated ALPN %q", tlsConn.ConnectionState().NegotiatedProtocol)
++		return nil, nil, fmt.Errorf("HTTP/2 endpoint negotiated ALPN %q", negotiatedProtocol)
+ 	}
+ 
+ 	raw := &rawH2Conn{
+@@ -151,6 +152,10 @@ func http2TLSConfig(base *tls.Config) *tls.Config {
+ 	return config
+ }
+ 
++func http2ALPNAccepted(protocol string) bool {
++	return protocol == "" || protocol == "h2"
++}
++
+ func (c *rawH2Conn) sendConnect(u *url.URL) (int, error) {
+ 	headerBytes, err := encodeH2ConnectHeaders(u)
+ 	if err != nil {
+diff --git a/api/masque_h2_test.go b/api/masque_h2_test.go
+index af8c689..0717f4f 100644
+--- a/api/masque_h2_test.go
++++ b/api/masque_h2_test.go
+@@ -24,6 +24,19 @@ func TestHTTP2TLSConfigUsesCanonicalSNIWithoutMutatingQUIC(t *testing.T) {
+ 	}
+ }
+ 
++func TestHTTP2ALPNAcceptsPriorKnowledge(t *testing.T) {
++	for _, protocol := range []string{"", "h2"} {
++		if !http2ALPNAccepted(protocol) {
++			t.Fatalf("expected ALPN %q to be accepted", protocol)
++		}
++	}
++	for _, protocol := range []string{"http/1.1", "h3"} {
++		if http2ALPNAccepted(protocol) {
++			t.Fatalf("expected ALPN %q to be rejected", protocol)
++		}
++	}
++}
++
+ func TestEncodeH2ConnectHeadersUsesCloudflarePlainConnect(t *testing.T) {
+ 	u, err := url.Parse("https://cloudflareaccess.com")
+ 	if err != nil {
