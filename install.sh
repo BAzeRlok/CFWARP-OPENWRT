@@ -7,7 +7,7 @@ REPOSITORY="BAzeRlok/CFWARP-OPENWRT"
 RELEASE_TAG="v1.6.0"
 RELEASE_URL="https://github.com/$REPOSITORY/releases/download/$RELEASE_TAG"
 LUCI_PACKAGE="luci-app-warp-1.6.0-r1.apk"
-I18N_PACKAGE="luci-i18n-warp-ru-26.245.22761~62cf6a9.apk"
+I18N_PACKAGE="luci-i18n-warp-ru-26.245.22761.62cf6a9.apk"
 TRANSPORT="${WARP_TRANSPORT:-http2}"
 MASQUE_SNI="${WARP_SNI:-ozon.ru}"
 

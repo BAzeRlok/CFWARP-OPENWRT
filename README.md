@@ -81,7 +81,7 @@ USQUE_PACKAGE="warp-usque-4.2.1-r1-$ARCH.apk"
 for PACKAGE in \
     "$USQUE_PACKAGE" \
     luci-app-warp-1.6.0-r1.apk \
-    luci-i18n-warp-ru-26.245.22761~62cf6a9.apk
+    luci-i18n-warp-ru-26.245.22761.62cf6a9.apk
 do
     EXPECTED="$(awk -v name="$PACKAGE" '$2 == name { print $1; exit }' SHA256SUMS)"
     ACTUAL="$(sha256sum "$PACKAGE" | awk '{ print $1 }')"
@@ -91,7 +91,7 @@ done
 apk add --allow-untrusted \
     "./$USQUE_PACKAGE" \
     ./luci-app-warp-1.6.0-r1.apk \
-    './luci-i18n-warp-ru-26.245.22761~62cf6a9.apk'
+    ./luci-i18n-warp-ru-26.245.22761.62cf6a9.apk
 
 uci set warp.main.masque_transport='http2'
 uci set warp.main.masque_sni='ozon.ru'
