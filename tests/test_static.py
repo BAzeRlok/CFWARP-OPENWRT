@@ -101,6 +101,7 @@ class PackageTests(unittest.TestCase):
         init = (ROOT / "root/etc/init.d/warp").read_text(encoding="utf-8")
         package = (ROOT / "warp-usque/Makefile").read_text(encoding="utf-8")
         patch = (ROOT / "warp-usque/patches/100-antidpi-cloudflare-api.patch").read_text(encoding="utf-8")
+        stability_patch = (ROOT / "warp-usque/patches/110-adaptive-transport.patch").read_text(encoding="utf-8")
         self.assertIn('USQUE_BIN="${WARP_USQUE_BIN:-/usr/libexec/warp-usque}"', manager)
         self.assertIn("set warp.main.actual_backend='usque_masque'", manager)
         self.assertIn('usque_profile_valid "$temp_usque_config"', manager)
@@ -109,14 +110,18 @@ class PackageTests(unittest.TestCase):
         self.assertIn("nativetun", init)
         self.assertNotIn("/etc/config/zapret", manager + init)
         self.assertNotIn("/opt/zapret", manager + init)
-        self.assertIn("PKG_VERSION:=3.0.1", package)
-        self.assertIn("PKG_HASH:=d9764ef667e3db08c2126daa851fc81fef5017030206ec22d447638368146b97", package)
+        self.assertIn("PKG_VERSION:=4.2.1", package)
+        self.assertIn("PKG_HASH:=cd0e9c89353915cb74a0877ab6fc68ee158adf8724ef9aab878a4d90edcb1d72", package)
         self.assertIn("HelloChrome_Auto", patch)
         self.assertIn("forceHTTP1ALPN", patch)
         self.assertIn('AlpnProtocols: []string{"http/1.1"}', patch)
         self.assertIn("clientHelloFragmentConn", patch)
         self.assertIn("ServerName: host", patch)
         self.assertIn("--reconnect-delay 1s", init)
+        self.assertIn("--http2-fallback", init)
+        self.assertIn("HTTP2FallbackEndpoint", stability_patch)
+        self.assertIn("ReadIdleTimeout", stability_patch)
+        self.assertIn("KeepAliveConfig", stability_patch)
         self.assertNotIn("--insecure", init)
 
     def test_runtime_start_reports_the_failed_phase(self):
@@ -166,7 +171,7 @@ class PackageTests(unittest.TestCase):
         makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
         self.assertIn("LUCI_PKGARCH:=all", makefile)
         self.assertIn("LUCI_NAME:=luci-app-warp", makefile)
-        self.assertIn("LUCI_EXTRA_DEPENDS:=kmod-tun (>=0), warp-usque (>=3.0.1)", makefile)
+        self.assertIn("LUCI_EXTRA_DEPENDS:=kmod-tun (>=0), warp-usque (>=4.2.1)", makefile)
         self.assertNotIn("+kmod-tun", makefile)
         self.assertNotIn("+warp-usque", makefile)
         self.assertNotIn("+wireguard-tools", makefile)
@@ -179,10 +184,12 @@ class PackageTests(unittest.TestCase):
     def test_installer_selects_supported_arm64_package(self):
         installer = (ROOT / "install.sh").read_text(encoding="utf-8")
         self.assertIn("aarch64|aarch64_cortex-a53)", installer)
-        self.assertIn('USQUE_PACKAGE="warp-usque-3.0.1-r1-$ARCH.apk"', installer)
+        self.assertIn('USQUE_PACKAGE="warp-usque-4.2.1-r1-$ARCH.apk"', installer)
         self.assertIn("DISTRIB_ARCH", installer)
         self.assertIn("OPENWRT_ARCH", installer)
-        self.assertIn('RELEASE_TAG="v1.5.0"', installer)
+        self.assertIn('RELEASE_TAG="v1.6.0"', installer)
+        self.assertIn('TRANSPORT="${WARP_TRANSPORT:-http2}"', installer)
+        self.assertIn("auto|quic|http2", installer)
 
 
 if __name__ == "__main__":

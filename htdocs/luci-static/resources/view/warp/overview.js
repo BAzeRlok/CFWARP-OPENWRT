@@ -244,7 +244,7 @@ return view.extend({
 
 		option = section.taboption('general', form.Value, 'keepalive', _('Persistent keepalive'));
 		option.datatype = 'range(0,65535)';
-		option.default = '25';
+		option.default = '5';
 		option.rmempty = false;
 
 		option = section.taboption('general', form.Flag, 'ipv4', _('Use IPv4'));
@@ -256,11 +256,12 @@ return view.extend({
 		option.rmempty = false;
 
 		option = section.taboption('advanced', form.ListValue, 'masque_transport', _('MASQUE transport'));
+		option.value('auto', _('Automatic fallback (QUIC → HTTP/2)'));
 		option.value('quic', _('QUIC / HTTP/3'));
 		option.value('http2', _('TCP / HTTP/2'));
-		option.default = 'quic';
+		option.default = 'http2';
 		option.rmempty = false;
-		option.description = _('Use HTTP/2 only when UDP/QUIC is blocked or unstable. Both transports are handled by the standalone backend.');
+		option.description = _('HTTP/2 is recommended for stability. Automatic mode starts with QUIC and permanently switches to HTTP/2 after the first QUIC failure.');
 
 		option = section.taboption('advanced', form.Value, 'masque_sni', _('MASQUE SNI'));
 		option.placeholder = 'ozon.ru';

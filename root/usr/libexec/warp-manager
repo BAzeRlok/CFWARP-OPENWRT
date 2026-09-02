@@ -123,10 +123,10 @@ validate_settings() {
 	CFG_AUTO=$(cfg_get auto_start 1)
 	CFG_INTERFACE=$(cfg_get interface warp)
 	CFG_MTU=$(cfg_get mtu 1280)
-	CFG_KEEPALIVE=$(cfg_get keepalive 25)
+	CFG_KEEPALIVE=$(cfg_get keepalive 5)
 	CFG_IPV4=$(cfg_get ipv4 1)
 	CFG_IPV6=$(cfg_get ipv6 1)
-	CFG_MASQUE_TRANSPORT=$(cfg_get masque_transport quic)
+	CFG_MASQUE_TRANSPORT=$(cfg_get masque_transport http2)
 	CFG_MASQUE_SNI=$(cfg_get masque_sni ozon.ru)
 	CFG_ACTUAL=$(cfg_get actual_interface '')
 	CFG_BACKEND=$(cfg_get actual_backend '')
@@ -137,7 +137,7 @@ validate_settings() {
 	valid_uint_range "$CFG_KEEPALIVE" 0 65535 || emit_error 'invalid_keepalive'
 	valid_flag "$CFG_IPV4" || emit_error 'invalid_ipv4_setting'
 	valid_flag "$CFG_IPV6" || emit_error 'invalid_ipv6_setting'
-	case "$CFG_MASQUE_TRANSPORT" in quic|http2) ;; *) emit_error 'invalid_masque_transport' ;; esac
+	case "$CFG_MASQUE_TRANSPORT" in auto|quic|http2) ;; *) emit_error 'invalid_masque_transport' ;; esac
 	[ -z "$CFG_MASQUE_SNI" ] || valid_hostname "$CFG_MASQUE_SNI" || emit_error 'invalid_masque_sni'
 	[ -z "$CFG_ACTUAL" ] || valid_uci_name "$CFG_ACTUAL" || emit_error 'invalid_managed_interface'
 	case "$CFG_BACKEND" in ''|usque_masque) ;; *) emit_error 'invalid_backend' ;; esac

@@ -1,7 +1,7 @@
 msgid ""
 msgstr ""
-"Project-Id-Version: luci-app-warp 1.5.0\n"
-"PO-Revision-Date: 2026-09-01 00:00+0300\n"
+"Project-Id-Version: luci-app-warp 1.6.0\n"
+"PO-Revision-Date: 2026-09-02 00:00+0300\n"
 "Last-Translator: luci-app-warp contributors\n"
 "Language-Team: Russian\n"
 "Language: ru\n"
@@ -37,6 +37,10 @@ msgstr "Принять и подключить"
 #: htdocs/luci-static/resources/view/warp/overview.js:227
 msgid "Advanced settings"
 msgstr "Расширенные настройки"
+
+#: htdocs/luci-static/resources/view/warp/overview.js:259
+msgid "Automatic fallback (QUIC → HTTP/2)"
+msgstr "Автопереключение (QUIC → HTTP/2)"
 
 #: htdocs/luci-static/resources/view/warp/overview.js:38
 msgid "Another WARP operation is already in progress."
@@ -432,13 +436,14 @@ msgstr ""
 "Используйте от 1 до 15 букв, цифр или знаков подчёркивания; первый символ не "
 "должен быть цифрой."
 
-#: htdocs/luci-static/resources/view/warp/overview.js:263
+#: htdocs/luci-static/resources/view/warp/overview.js:264
 msgid ""
-"Use HTTP/2 only when UDP/QUIC is blocked or unstable. Both transports are "
-"handled by the standalone backend."
+"HTTP/2 is recommended for stability. Automatic mode starts with QUIC and "
+"permanently switches to HTTP/2 after the first QUIC failure."
 msgstr ""
-"Используйте HTTP/2, только если UDP/QUIC заблокирован или нестабилен. Оба "
-"транспорта обслуживает автономный backend."
+"Для стабильной работы рекомендуется HTTP/2. Автоматический режим начинает "
+"работу через QUIC и после первого сбоя QUIC до перезапуска переключается на "
+"HTTP/2."
 
 #: htdocs/luci-static/resources/view/warp/overview.js:250
 msgid "Use IPv4"

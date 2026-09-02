@@ -1,6 +1,6 @@
 msgid ""
 msgstr ""
-"Project-Id-Version: luci-app-warp 1.5.0\n"
+"Project-Id-Version: luci-app-warp 1.6.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 
 #: htdocs/luci-static/resources/view/warp/overview.js:47
@@ -24,6 +24,10 @@ msgstr ""
 
 #: htdocs/luci-static/resources/view/warp/overview.js:227
 msgid "Advanced settings"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/warp/overview.js:259
+msgid "Automatic fallback (QUIC → HTTP/2)"
 msgstr ""
 
 #: htdocs/luci-static/resources/view/warp/overview.js:38
@@ -403,10 +407,10 @@ msgid ""
 "digit."
 msgstr ""
 
-#: htdocs/luci-static/resources/view/warp/overview.js:263
+#: htdocs/luci-static/resources/view/warp/overview.js:264
 msgid ""
-"Use HTTP/2 only when UDP/QUIC is blocked or unstable. Both transports are "
-"handled by the standalone backend."
+"HTTP/2 is recommended for stability. Automatic mode starts with QUIC and "
+"permanently switches to HTTP/2 after the first QUIC failure."
 msgstr ""
 
 #: htdocs/luci-static/resources/view/warp/overview.js:250

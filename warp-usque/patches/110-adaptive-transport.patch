@@ -1,0 +1,347 @@
+diff --git a/api/masque.go b/api/masque.go
+index 96c8b52c8774d6bbece8e5bebe5dcd725b3797bd..be4fda0ef3ab297027bc7e3385b6053f660a5090 100644
+--- a/api/masque.go
++++ b/api/masque.go
+@@ -11,6 +11,7 @@ import (
+ 	"net/http"
+ 	"net/url"
+ 	"strings"
++	"time"
+ 
+ 	connectip "github.com/Diniboy1123/connect-ip-go"
+ 	"github.com/quic-go/quic-go"
+@@ -19,6 +20,26 @@ import (
+ 	"golang.org/x/net/http2"
+ )
+ 
++const (
++	http2ReadIdleTimeout = 15 * time.Second
++	http2PingTimeout     = 10 * time.Second
++	tcpKeepAliveIdle     = 10 * time.Second
++	tcpKeepAliveInterval = 5 * time.Second
++	tcpKeepAliveCount    = 3
++)
++
++func persistentTCPDialer() *net.Dialer {
++	return &net.Dialer{
++		Timeout: 15 * time.Second,
++		KeepAliveConfig: net.KeepAliveConfig{
++			Enable:   true,
++			Idle:     tcpKeepAliveIdle,
++			Interval: tcpKeepAliveInterval,
++			Count:    tcpKeepAliveCount,
++		},
++	}
++}
++
+ // PrepareTlsConfig creates a TLS configuration using the provided certificate and SNI (Server Name Indication).
+ // It also verifies the peer's public key against the provided public key.
+ //
+@@ -239,8 +260,10 @@ func newHTTP2Client(baseTLSConfig *tls.Config, endpoint *net.TCPAddr, connectURI
+ 
+ 	if proxyURL == nil {
+ 		transport := &http2.Transport{
++			ReadIdleTimeout: http2ReadIdleTimeout,
++			PingTimeout:     http2PingTimeout,
+ 			DialTLSContext: func(ctx context.Context, network, _ string, _ *tls.Config) (net.Conn, error) {
+-				dialer := &net.Dialer{}
++				dialer := persistentTCPDialer()
+ 				conn, err := dialer.DialContext(ctx, network, endpoint.String())
+ 				if err != nil {
+ 					return nil, err
+@@ -260,12 +283,16 @@ func newHTTP2Client(baseTLSConfig *tls.Config, endpoint *net.TCPAddr, connectURI
+ 
+ 	originAuthority := authorityWithDefaultPort(parsedURI, "443")
+ 	proxyAuthority := authorityWithDefaultPort(proxyURL, proxyDefaultPort(proxyURL))
+-	dialer := &net.Dialer{}
++	dialer := persistentTCPDialer()
+ 	transport := &http.Transport{
+ 		Proxy:              http.ProxyFromEnvironment,
+ 		ForceAttemptHTTP2:  true,
+ 		DisableCompression: true,
+ 		TLSClientConfig:    tlsConfig,
++		HTTP2: &http.HTTP2Config{
++			SendPingTimeout: http2ReadIdleTimeout,
++			PingTimeout:     http2PingTimeout,
++		},
+ 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+ 			if addr == originAuthority {
+ 				addr = endpoint.String()
+diff --git a/api/tunnel.go b/api/tunnel.go
+index 5f06187acfa7bf4d075220141010e57edd157259..4ad1bcc82436eac95f2a06d46014d86448fa1304 100644
+--- a/api/tunnel.go
++++ b/api/tunnel.go
+@@ -165,11 +165,15 @@ type MaintainTunnelConfig struct {
+ 	KeepalivePeriod   time.Duration
+ 	InitialPacketSize uint16
+ 	Endpoint          net.Addr
+-	Device            TunnelDevice
+-	MTU               int
+-	ReconnectDelay    time.Duration
+-	AlwaysReconnect   bool
+-	UseHTTP2          bool
++	// HTTP2FallbackEndpoint switches an HTTP/3 tunnel to HTTP/2 after the
++	// first connection failure. Once activated, HTTP/2 remains selected until
++	// the process is restarted so an unstable UDP path is not retried forever.
++	HTTP2FallbackEndpoint net.Addr
++	Device                TunnelDevice
++	MTU                   int
++	ReconnectDelay        time.Duration
++	AlwaysReconnect       bool
++	UseHTTP2              bool
+ 	// OnConnect is a path to an executable run after every successful tunnel
+ 	// connect. It is exec'd directly (no shell, no args) and runs fire-and-forget.
+ 	OnConnect string
+@@ -182,6 +186,24 @@ type MaintainTunnelConfig struct {
+ 	HookEnv map[string]string
+ }
+ 
++func endpointMatchesTransport(endpoint net.Addr, useHTTP2 bool) bool {
++	if useHTTP2 {
++		_, ok := endpoint.(*net.TCPAddr)
++		return ok
++	}
++	_, ok := endpoint.(*net.UDPAddr)
++	return ok
++}
++
++func activateHTTP2Fallback(useHTTP2 *bool, endpoint *net.Addr, fallback net.Addr) bool {
++	if *useHTTP2 || fallback == nil || !endpointMatchesTransport(fallback, true) {
++		return false
++	}
++	*useHTTP2 = true
++	*endpoint = fallback
++	return true
++}
++
+ // cloneHookEnv returns a shallow copy of src so concurrent hook invocations
+ // do not share a map.
+ func cloneHookEnv(src map[string]string) map[string]string {
+@@ -220,16 +242,17 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
+ //   - ctx: context.Context - The context for the connection.
+ //   - cfg: MaintainTunnelConfig - Tunnel maintenance runtime configuration.
+ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
+-	if cfg.UseHTTP2 {
+-		if _, ok := cfg.Endpoint.(*net.TCPAddr); !ok {
+-			log.Fatalf("MaintainTunnel: HTTP/2 mode requires a *net.TCPAddr endpoint, got %T", cfg.Endpoint)
+-		}
+-	} else {
+-		if _, ok := cfg.Endpoint.(*net.UDPAddr); !ok {
+-			log.Fatalf("MaintainTunnel: HTTP/3 mode requires a *net.UDPAddr endpoint, got %T", cfg.Endpoint)
++	if !endpointMatchesTransport(cfg.Endpoint, cfg.UseHTTP2) {
++		log.Fatalf("MaintainTunnel: endpoint %T does not match selected transport", cfg.Endpoint)
++	}
++	if cfg.HTTP2FallbackEndpoint != nil {
++		if cfg.UseHTTP2 || !endpointMatchesTransport(cfg.HTTP2FallbackEndpoint, true) {
++			log.Fatalf("MaintainTunnel: HTTP/2 fallback requires HTTP/3 primary and a *net.TCPAddr fallback, got %T", cfg.HTTP2FallbackEndpoint)
+ 		}
+ 	}
+ 
++	activeEndpoint := cfg.Endpoint
++	useHTTP2 := cfg.UseHTTP2
+ 	packetBufferPool := NewNetBuffer(cfg.MTU + datagramContextIDHeadroom)
+ 
+ 	for {
+@@ -253,14 +276,14 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
+ 			log.Printf("Detected outbound activity (%d bytes). Reconnecting...", n)
+ 		}
+ 
+-		log.Printf("Establishing MASQUE connection to %s", cfg.Endpoint)
++		log.Printf("Establishing MASQUE connection to %s", activeEndpoint)
+ 		udpConn, tr, ipConn, rsp, err := ConnectTunnel(
+ 			ctx,
+ 			cfg.TLSConfig,
+ 			internal.DefaultQuicConfig(cfg.KeepalivePeriod, cfg.InitialPacketSize),
+ 			internal.ConnectURI,
+-			cfg.Endpoint,
+-			cfg.UseHTTP2,
++			activeEndpoint,
++			useHTTP2,
+ 		)
+ 		if err != nil {
+ 			log.Printf("Failed to connect tunnel: %v", err)
+@@ -273,8 +296,12 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
+ 			if udpConn != nil {
+ 				_ = udpConn.Close()
+ 			}
+-			if sleepErr := sleepCtx(ctx, cfg.ReconnectDelay); sleepErr != nil {
+-				return
++			if activateHTTP2Fallback(&useHTTP2, &activeEndpoint, cfg.HTTP2FallbackEndpoint) {
++				log.Printf("QUIC path failed; switching to persistent HTTP/2 endpoint %s", activeEndpoint)
++			} else {
++				if sleepErr := sleepCtx(ctx, cfg.ReconnectDelay); sleepErr != nil {
++					return
++				}
+ 			}
+ 			continue
+ 		}
+@@ -298,7 +325,7 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
+ 		if cfg.OnConnect != "" {
+ 			env := cloneHookEnv(cfg.HookEnv)
+ 			env["USQUE_EVENT"] = "connect"
+-			env["USQUE_ENDPOINT"] = cfg.Endpoint.String()
++			env["USQUE_ENDPOINT"] = activeEndpoint.String()
+ 			RunHook(cfg.OnConnect, env)
+ 		}
+ 
+@@ -357,7 +384,7 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
+ 			for {
+ 				packet, err := ipConn.ReadPacketZeroCopy(true)
+ 				if err != nil {
+-					if cfg.UseHTTP2 {
++					if useHTTP2 {
+ 						errChan <- fmt.Errorf("connection closed while reading from IP connection: %w", err)
+ 						return
+ 					}
+@@ -381,7 +408,7 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
+ 		if cfg.OnDisconnect != "" {
+ 			env := cloneHookEnv(cfg.HookEnv)
+ 			env["USQUE_EVENT"] = "disconnect"
+-			env["USQUE_ENDPOINT"] = cfg.Endpoint.String()
++			env["USQUE_ENDPOINT"] = activeEndpoint.String()
+ 			RunHook(cfg.OnDisconnect, env)
+ 		}
+ 
+@@ -405,8 +432,12 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
+ 		if udpConn != nil {
+ 			_ = udpConn.Close()
+ 		}
+-		if sleepErr := sleepCtx(ctx, cfg.ReconnectDelay); sleepErr != nil {
+-			return
++		if activateHTTP2Fallback(&useHTTP2, &activeEndpoint, cfg.HTTP2FallbackEndpoint) {
++			log.Printf("QUIC tunnel became inactive; switching to persistent HTTP/2 endpoint %s", activeEndpoint)
++		} else {
++			if sleepErr := sleepCtx(ctx, cfg.ReconnectDelay); sleepErr != nil {
++				return
++			}
+ 		}
+ 	}
+ }
+diff --git a/api/tunnel_fallback_test.go b/api/tunnel_fallback_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..1137128c171c772ef592e9fdc585a4f60f6590e8
+--- /dev/null
++++ b/api/tunnel_fallback_test.go
+@@ -0,0 +1,38 @@
++package api
++
++import (
++	"net"
++	"testing"
++)
++
++func TestActivateHTTP2Fallback(t *testing.T) {
++	useHTTP2 := false
++	var endpoint net.Addr = &net.UDPAddr{IP: net.IPv4(162, 159, 198, 2), Port: 443}
++	fallback := &net.TCPAddr{IP: net.IPv4(162, 159, 198, 2), Port: 443}
++
++	if !activateHTTP2Fallback(&useHTTP2, &endpoint, fallback) {
++		t.Fatal("expected fallback activation")
++	}
++	if !useHTTP2 {
++		t.Fatal("HTTP/2 was not selected")
++	}
++	if endpoint != fallback {
++		t.Fatalf("unexpected fallback endpoint: %v", endpoint)
++	}
++	if activateHTTP2Fallback(&useHTTP2, &endpoint, fallback) {
++		t.Fatal("fallback activated twice")
++	}
++}
++
++func TestActivateHTTP2FallbackRejectsInvalidEndpoint(t *testing.T) {
++	useHTTP2 := false
++	var endpoint net.Addr = &net.UDPAddr{IP: net.IPv4zero, Port: 443}
++	invalidFallback := &net.UDPAddr{IP: net.IPv4zero, Port: 443}
++
++	if activateHTTP2Fallback(&useHTTP2, &endpoint, invalidFallback) {
++		t.Fatal("accepted a non-TCP fallback endpoint")
++	}
++	if useHTTP2 {
++		t.Fatal("transport changed after invalid fallback")
++	}
++}
+diff --git a/cmd/nativetun.go b/cmd/nativetun.go
+index 840c99944bd48dd58d3c21bc5df00d19c3e2d768..cecfc95416c67011c7804b832180ebeb3b67e23b 100644
+--- a/cmd/nativetun.go
++++ b/cmd/nativetun.go
+@@ -3,6 +3,7 @@ package cmd
+ import (
+ 	"context"
+ 	"log"
++	"net"
+ 	"time"
+ 
+ 	"github.com/Diniboy1123/usque/api"
+@@ -87,6 +88,15 @@ var nativeTunCmd = &cobra.Command{
+ 			cmd.Printf("Failed to get HTTP/2 flag: %v\n", err)
+ 			return
+ 		}
++		http2Fallback, err := cmd.Flags().GetBool("http2-fallback")
++		if err != nil {
++			cmd.Printf("Failed to get HTTP/2 fallback flag: %v\n", err)
++			return
++		}
++		if useHTTP2 && http2Fallback {
++			cmd.Println("The --http2 and --http2-fallback flags are mutually exclusive")
++			return
++		}
+ 
+ 		useIPv6, err := cmd.Flags().GetBool("ipv6")
+ 		if err != nil {
+@@ -99,6 +109,15 @@ var nativeTunCmd = &cobra.Command{
+ 			cmd.Printf("Failed to select endpoint: %v\n", err)
+ 			return
+ 		}
++		var http2FallbackEndpoint net.Addr
++		if http2Fallback {
++			http2FallbackEndpoint, err = config.SelectEndpointFromConfig(true, useIPv6, connectPort)
++			if err != nil {
++				cmd.Printf("Failed to select HTTP/2 fallback endpoint: %v\n", err)
++				return
++			}
++			log.Printf("Adaptive transport enabled. HTTP/2 fallback endpoint: %s", http2FallbackEndpoint)
++		}
+ 
+ 		if insecure {
+ 			config.WarnInsecure()
+@@ -204,18 +223,19 @@ var nativeTunCmd = &cobra.Command{
+ 		}
+ 
+ 		go api.MaintainTunnel(context.Background(), api.MaintainTunnelConfig{
+-			TLSConfig:         tlsConfig,
+-			KeepalivePeriod:   keepalivePeriod,
+-			InitialPacketSize: initialPacketSize,
+-			Endpoint:          endpoint,
+-			Device:            dev,
+-			MTU:               mtu,
+-			ReconnectDelay:    reconnectDelay,
+-			AlwaysReconnect:   alwaysReconnect,
+-			UseHTTP2:          useHTTP2,
+-			OnConnect:         onConnect,
+-			OnDisconnect:      onDisconnect,
+-			HookEnv:           hookEnv,
++			TLSConfig:             tlsConfig,
++			KeepalivePeriod:       keepalivePeriod,
++			InitialPacketSize:     initialPacketSize,
++			Endpoint:              endpoint,
++			HTTP2FallbackEndpoint: http2FallbackEndpoint,
++			Device:                dev,
++			MTU:                   mtu,
++			ReconnectDelay:        reconnectDelay,
++			AlwaysReconnect:       alwaysReconnect,
++			UseHTTP2:              useHTTP2,
++			OnConnect:             onConnect,
++			OnDisconnect:          onDisconnect,
++			HookEnv:               hookEnv,
+ 		})
+ 
+ 		log.Println("Tunnel established, you may now set up routing and DNS")
+@@ -237,6 +257,7 @@ func init() {
+ 	nativeTunCmd.Flags().DurationP("reconnect-delay", "r", 1*time.Second, "Delay between reconnect attempts")
+ 	nativeTunCmd.Flags().Bool("always-reconnect", false, "Always reconnect after tunnel loss, even when idle")
+ 	nativeTunCmd.Flags().Bool("http2", false, "Use HTTP/2 over TCP+TLS instead of HTTP/3 over QUIC."+config.EndpointHelpSuffixH2)
++	nativeTunCmd.Flags().Bool("http2-fallback", false, "Start with HTTP/3 and permanently switch to HTTP/2 after a QUIC connection failure."+config.EndpointHelpSuffixH2)
+ 	nativeTunCmd.Flags().Bool("insecure", false, "Disable endpoint certificate pinning and trust any certificate")
+ 	nativeTunCmd.Flags().StringP("interface-name", "n", "", "Custom interface name for the TUN interface")
+ 	nativeTunCmd.Flags().Bool("persist", false, "Linux only: Keep the TUN interface after exit")

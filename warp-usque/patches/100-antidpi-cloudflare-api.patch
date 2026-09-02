@@ -1,30 +1,30 @@
 diff --git a/api/cloudflare.go b/api/cloudflare.go
-index 41c73f8..664df1a 100644
+index 850c3fc8a511ff7de99aef7c8a75e14561f58c27..ff8c0ef8d97c1c487e0ec0dc5532d2be5d2b5a63 100644
 --- a/api/cloudflare.go
 +++ b/api/cloudflare.go
-@@ -86,7 +86,7 @@ func Register(model, locale, jwt string, acceptTos bool) (models.AccountData, er
+@@ -86,7 +86,7 @@ func Register(model, locale, jwt string, acceptTos bool) (*models.AccountData, e
  		req.Header.Set("CF-Access-Jwt-Assertion", jwt)
  	}
  
 -	resp, err := http.DefaultClient.Do(req)
 +	resp, err := cloudflareHTTPClient.Do(req)
  	if err != nil {
- 		return models.AccountData{}, fmt.Errorf("failed to send request: %v", err)
+ 		return nil, fmt.Errorf("failed to send request: %v", err)
  	}
-@@ -149,7 +149,7 @@ func EnrollKey(accountData models.AccountData, pubKey []byte, deviceName string)
+@@ -159,7 +159,7 @@ func EnrollKey(deviceId string, deviceToken string, pubKey []byte, deviceName st
  	}
- 	req.Header.Set("Authorization", "Bearer "+accountData.Token)
+ 	req.Header.Set("Authorization", "Bearer "+deviceToken)
  
 -	resp, err := http.DefaultClient.Do(req)
 +	resp, err := cloudflareHTTPClient.Do(req)
  	if err != nil {
- 		return models.AccountData{}, nil, fmt.Errorf("failed to send request: %v", err)
+ 		return nil, fmt.Errorf("failed to send request: %v", err)
  	}
 diff --git a/api/masque.go b/api/masque.go
-index 8f0c0ad..3e3ef28 100644
+index 6b2c5d9712cb68d8399245d789e1f9e7ed114f68..96c8b52c8774d6bbece8e5bebe5dcd725b3797bd 100644
 --- a/api/masque.go
 +++ b/api/masque.go
-@@ -221,7 +221,7 @@ func newHTTP2Client(baseTLSConfig *tls.Config, endpoint *net.TCPAddr, connectURI
+@@ -246,7 +246,7 @@ func newHTTP2Client(baseTLSConfig *tls.Config, endpoint *net.TCPAddr, connectURI
  					return nil, err
  				}
  
@@ -33,7 +33,7 @@ index 8f0c0ad..3e3ef28 100644
  				if err := tlsConn.HandshakeContext(ctx); err != nil {
  					_ = conn.Close()
  					return nil, err
-@@ -261,7 +261,7 @@ func newHTTP2Client(baseTLSConfig *tls.Config, endpoint *net.TCPAddr, connectURI
+@@ -286,7 +286,7 @@ func newHTTP2Client(baseTLSConfig *tls.Config, endpoint *net.TCPAddr, connectURI
  				return nil, err
  			}
  
@@ -44,10 +44,10 @@ index 8f0c0ad..3e3ef28 100644
  				return nil, err
 diff --git a/api/transport.go b/api/transport.go
 new file mode 100644
-index 0000000..0e8fc09
+index 0000000000000000000000000000000000000000..e40cda8c1b117135a4b2523a75efd55b970c6b5b
 --- /dev/null
 +++ b/api/transport.go
-@@ -0,0 +1,170 @@
+@@ -0,0 +1,191 @@
 +package api
 +
 +import (
@@ -94,11 +94,32 @@ index 0000000..0e8fc09
 +		ServerName: host,
 +		NextProtos: []string{"http/1.1"},
 +	}, utls.HelloChrome_Auto)
++	// Chrome fingerprints advertise HTTP/2 by default. net/http cannot detect
++	// the negotiated protocol on a custom uTLS connection and would parse HTTP/2
++	// frames as an HTTP/1.x response. Build the preset first, then constrain its
++	// ALPN extension to the protocol used by this Transport.
++	if err = tlsConn.BuildHandshakeState(); err != nil {
++		rawConn.Close()
++		return nil, err
++	}
++	forceHTTP1ALPN(tlsConn)
 +	if err = tlsConn.HandshakeContext(ctx); err != nil {
 +		rawConn.Close()
 +		return nil, err
 +	}
 +	return tlsConn, nil
++}
++
++func forceHTTP1ALPN(conn *utls.UConn) {
++	for _, extension := range conn.Extensions {
++		if alpn, ok := extension.(*utls.ALPNExtension); ok {
++			alpn.AlpnProtocols = []string{"http/1.1"}
++			return
++		}
++	}
++	conn.Extensions = append(conn.Extensions, &utls.ALPNExtension{
++		AlpnProtocols: []string{"http/1.1"},
++	})
 +}
 +
 +type clientHelloFragmentConn struct {
@@ -220,16 +241,44 @@ index 0000000..0e8fc09
 +}
 diff --git a/api/transport_test.go b/api/transport_test.go
 new file mode 100644
-index 0000000..a98aa88
+index 0000000000000000000000000000000000000000..11fac1227053797afaea43a29413070c38f75d22
 --- /dev/null
 +++ b/api/transport_test.go
-@@ -0,0 +1,81 @@
+@@ -0,0 +1,109 @@
 +package api
 +
 +import (
 +	"encoding/binary"
++	"reflect"
 +	"testing"
++
++	utls "github.com/metacubex/utls"
 +)
++
++func TestForceHTTP1ALPN(t *testing.T) {
++	connection := &utls.UConn{Extensions: []utls.TLSExtension{
++		&utls.ALPNExtension{AlpnProtocols: []string{"h2", "http/1.1"}},
++	}}
++	forceHTTP1ALPN(connection)
++
++	alpn := connection.Extensions[0].(*utls.ALPNExtension)
++	if !reflect.DeepEqual(alpn.AlpnProtocols, []string{"http/1.1"}) {
++		t.Fatalf("unexpected ALPN protocols: %v", alpn.AlpnProtocols)
++	}
++}
++
++func TestForceHTTP1ALPNAddsMissingExtension(t *testing.T) {
++	connection := &utls.UConn{}
++	forceHTTP1ALPN(connection)
++
++	if len(connection.Extensions) != 1 {
++		t.Fatalf("expected one ALPN extension, got %d", len(connection.Extensions))
++	}
++	alpn := connection.Extensions[0].(*utls.ALPNExtension)
++	if !reflect.DeepEqual(alpn.AlpnProtocols, []string{"http/1.1"}) {
++		t.Fatalf("unexpected ALPN protocols: %v", alpn.AlpnProtocols)
++	}
++}
 +
 +func TestClientHelloSNISplit(t *testing.T) {
 +	hostname := "api.cloudflareclient.com"
@@ -305,16 +354,42 @@ index 0000000..a98aa88
 +	}
 +	return -1
 +}
+diff --git a/cmd/root.go b/cmd/root.go
+index 1ac8e1b4089da42e081ea1d1f536108e969e0163..84abbef6a23ace19b4554318f444f3ebbdb3f576 100644
+--- a/cmd/root.go
++++ b/cmd/root.go
+@@ -2,6 +2,7 @@ package cmd
+ 
+ import (
+ 	"log"
++	"os"
+ 
+ 	"github.com/Diniboy1123/usque/config"
+ 	"github.com/Diniboy1123/usque/internal"
+@@ -19,6 +20,13 @@ var rootCmd = &cobra.Command{
+ 		}
+ 
+ 		if configPath != "" {
++			// A missing output file is the expected first-run state for register.
++			// Do not print a misleading configuration error before creating it.
++			if cmd.Name() == "register" {
++				if _, err := os.Stat(configPath); os.IsNotExist(err) {
++					return
++				}
++			}
+ 			if err := config.LoadConfig(configPath); err != nil {
+ 				log.Printf("Config file not found: %v", err)
+ 				log.Printf("You may only use the register command to generate one.")
 diff --git a/go.mod b/go.mod
-index 267753a..e743a51 100644
+index c04f0e146b8c55d80fee66b7ff806176474c6ae2..db1aee94a0f31d8585bacdb96a579a6fa03380bd 100644
 --- a/go.mod
 +++ b/go.mod
-@@ -4,6 +4,7 @@ go 1.25.5
+@@ -4,6 +4,7 @@ go 1.26.3
  
  require (
  	github.com/Diniboy1123/connect-ip-go v0.0.0-20260613064811-66cba32d7d33
 +	github.com/metacubex/utls v1.8.4
- 	github.com/quic-go/quic-go v0.59.0
+ 	github.com/quic-go/quic-go v0.60.0
  	github.com/songgao/water v0.0.0-20200317203138-2b4b6d7c09d8
  	github.com/spf13/cobra v1.10.2
 @@ -17,9 +18,11 @@ require (
@@ -330,127 +405,132 @@ index 267753a..e743a51 100644
  	github.com/quic-go/qpack v0.6.0 // indirect
  	github.com/spf13/pflag v1.0.10 // indirect
 diff --git a/go.sum b/go.sum
-index 02a5822..09d8a85 100644
+index e752e936b29166f08bfaeb23a5ad2a7c76a74220..fabcc06bc9d01e0fafd2188c307153c91d88b603 100644
 --- a/go.sum
 +++ b/go.sum
-@@ -1,6 +1,12 @@
- github.com/Diniboy1123/connect-ip-go v0.0.0-20260409225322-8d7bb0a858a2 h1:CSkftuPP50OXfjP9Bcoy+d0Ue1Pv038mRPs8bkN83UA=
- github.com/Diniboy1123/connect-ip-go v0.0.0-20260409225322-8d7bb0a858a2/go.mod h1:wi7UWeMy3b9dwZZeMcJjgZfjmmJn4z+ulsfdljz+Y/E=
+@@ -1,25 +1,30 @@
  github.com/Diniboy1123/connect-ip-go v0.0.0-20260613064811-66cba32d7d33 h1:HHEVWeNlF1ytUyi4xH+K0yVrkAwCOBAz2WvriKbs7HQ=
  github.com/Diniboy1123/connect-ip-go v0.0.0-20260613064811-66cba32d7d33/go.mod h1:wi7UWeMy3b9dwZZeMcJjgZfjmmJn4z+ulsfdljz+Y/E=
 +github.com/andybalholm/brotli v1.0.6 h1:Yf9fFpf49Zrxb9NlQaluyE92/+X7UVHlhMNJN2sxfOI=
 +github.com/andybalholm/brotli v1.0.6/go.mod h1:fO7iG3H7G2nSZ7m0zPUDn85XEX2GTukHGRSepvi9Eig=
+ github.com/cpuguy83/go-md2man/v2 v2.0.6/go.mod h1:oOW0eioCTA6cOiMLiUPZOpcVxMig6NIQQ7OS05n1F4g=
+-github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
+-github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
+ github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc h1:U9qPSI2PIWSS1VwoXQT9A3Wy9MM3WgvqSxFWenqJduM=
++github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
+ github.com/dunglas/httpsfv v1.1.0 h1:Jw76nAyKWKZKFrpMMcL76y35tOpYHqQPzHQiwDvpe54=
+ github.com/dunglas/httpsfv v1.1.0/go.mod h1:zID2mqw9mFsnt7YC3vYQ9/cjq30q41W+1AnDwH8TiMg=
+ github.com/google/btree v1.1.3 h1:CVpQJjYgC4VbzxeGVHfvZrv1ctoYCAI8vbl07Fcxlyg=
+ github.com/google/btree v1.1.3/go.mod h1:qOPhT0dTNdNzV6Z/lhRX0YXUafgPLFUh+gZMl761Gm4=
+ github.com/inconshreveable/mousetrap v1.1.0 h1:wN+x4NVGpMsO7ErUn/mUI3vEoE6Jt13X2s0bqwp9tc8=
+ github.com/inconshreveable/mousetrap v1.1.0/go.mod h1:vpF70FUmC8bwa3OWnCshd2FqLfsEA9PFc4w1p2J65bw=
 +github.com/klauspost/compress v1.17.9 h1:6KIumPrER1LHsvBVuDa0r5xaG0Es51mhhB9BQB2qeMA=
 +github.com/klauspost/compress v1.17.9/go.mod h1:Di0epgTjJY877eYKx5yC51cX2A2Vl2ibi7bDH9ttBbw=
 +github.com/metacubex/utls v1.8.4 h1:HmL9nUApDdWSkgUyodfwF6hSjtiwCGGdyhaSpEejKpg=
 +github.com/metacubex/utls v1.8.4/go.mod h1:kncGGVhFaoGn5M3pFe3SXhZCzsbCJayNOH4UEqTKTko=
- github.com/cpuguy83/go-md2man/v2 v2.0.6/go.mod h1:oOW0eioCTA6cOiMLiUPZOpcVxMig6NIQQ7OS05n1F4g=
- github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
- github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
-diff --git a/api/transport.go b/api/transport.go
-index 0e8fc09..e40cda8 100644
---- a/api/transport.go
-+++ b/api/transport.go
-@@ -44,6 +44,15 @@ func dialCloudflareTLS(ctx context.Context, network, address string) (net.Conn,
- 		ServerName: host,
- 		NextProtos: []string{"http/1.1"},
- 	}, utls.HelloChrome_Auto)
-+	// Chrome fingerprints advertise HTTP/2 by default. net/http cannot detect
-+	// the negotiated protocol on a custom uTLS connection and would parse HTTP/2
-+	// frames as an HTTP/1.x response. Build the preset first, then constrain its
-+	// ALPN extension to the protocol used by this Transport.
-+	if err = tlsConn.BuildHandshakeState(); err != nil {
-+		rawConn.Close()
-+		return nil, err
-+	}
-+	forceHTTP1ALPN(tlsConn)
- 	if err = tlsConn.HandshakeContext(ctx); err != nil {
- 		rawConn.Close()
- 		return nil, err
-@@ -51,6 +60,18 @@ func dialCloudflareTLS(ctx context.Context, network, address string) (net.Conn,
- 	return tlsConn, nil
- }
- 
-+func forceHTTP1ALPN(conn *utls.UConn) {
-+	for _, extension := range conn.Extensions {
-+		if alpn, ok := extension.(*utls.ALPNExtension); ok {
-+			alpn.AlpnProtocols = []string{"http/1.1"}
-+			return
-+		}
-+	}
-+	conn.Extensions = append(conn.Extensions, &utls.ALPNExtension{
-+		AlpnProtocols: []string{"http/1.1"},
-+	})
-+}
-+
- type clientHelloFragmentConn struct {
- 	net.Conn
- 	written bool
-diff --git a/api/transport_test.go b/api/transport_test.go
-index a98aa88..11fac12 100644
---- a/api/transport_test.go
-+++ b/api/transport_test.go
-@@ -2,9 +2,37 @@ package api
- 
- import (
- 	"encoding/binary"
-+	"reflect"
- 	"testing"
-+
-+	utls "github.com/metacubex/utls"
- )
- 
-+func TestForceHTTP1ALPN(t *testing.T) {
-+	connection := &utls.UConn{Extensions: []utls.TLSExtension{
-+		&utls.ALPNExtension{AlpnProtocols: []string{"h2", "http/1.1"}},
-+	}}
-+	forceHTTP1ALPN(connection)
-+
-+	alpn := connection.Extensions[0].(*utls.ALPNExtension)
-+	if !reflect.DeepEqual(alpn.AlpnProtocols, []string{"http/1.1"}) {
-+		t.Fatalf("unexpected ALPN protocols: %v", alpn.AlpnProtocols)
-+	}
-+}
-+
-+func TestForceHTTP1ALPNAddsMissingExtension(t *testing.T) {
-+	connection := &utls.UConn{}
-+	forceHTTP1ALPN(connection)
-+
-+	if len(connection.Extensions) != 1 {
-+		t.Fatalf("expected one ALPN extension, got %d", len(connection.Extensions))
-+	}
-+	alpn := connection.Extensions[0].(*utls.ALPNExtension)
-+	if !reflect.DeepEqual(alpn.AlpnProtocols, []string{"http/1.1"}) {
-+		t.Fatalf("unexpected ALPN protocols: %v", alpn.AlpnProtocols)
-+	}
-+}
-+
- func TestClientHelloSNISplit(t *testing.T) {
- 	hostname := "api.cloudflareclient.com"
- 	record := syntheticClientHello(hostname)
-diff --git a/cmd/root.go b/cmd/root.go
-index 50308d8..67bdcf3 100644
---- a/cmd/root.go
-+++ b/cmd/root.go
-@@ -2,6 +2,7 @@ package cmd
- 
- import (
- 	"log"
-+	"os"
- 
- 	"github.com/Diniboy1123/usque/config"
- 	"github.com/spf13/cobra"
-@@ -18,6 +19,13 @@ var rootCmd = &cobra.Command{
- 		}
- 
- 		if configPath != "" {
-+			// A missing output file is the expected first-run state for register.
-+			// Do not print a misleading configuration error before creating it.
-+			if cmd.Name() == "register" {
-+				if _, err := os.Stat(configPath); os.IsNotExist(err) {
-+					return
-+				}
-+			}
- 			if err := config.LoadConfig(configPath); err != nil {
- 				log.Printf("Config file not found: %v", err)
- 				log.Printf("You may only use the register command to generate one.")
+ github.com/miekg/dns v1.1.51 h1:0+Xg7vObnhrz/4ZCZcZh7zPXlmU0aveS2HDBd0m0qSo=
+ github.com/miekg/dns v1.1.51/go.mod h1:2Z9d3CP1LQWihRZUf29mQ19yDThaI4DAYzte2CaQW5c=
+ github.com/patrickmn/go-cache v2.1.0+incompatible h1:HRMgzkcYKYpi3C8ajMPV8OFXaaRUnok+kx1WdO15EQc=
+ github.com/patrickmn/go-cache v2.1.0+incompatible/go.mod h1:3Qf8kWWT7OJRJbdiICTKqZju1ZixQ/KpMGzzAfe6+WQ=
+ github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
+ github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
++github.com/quic-go/go-ossfuzz-seeds v0.1.0 h1:APacT+iIaNF6fd8AGEiN3bT/Jtkd2jz4v4TzM7MFjy0=
++github.com/quic-go/go-ossfuzz-seeds v0.1.0/go.mod h1:3IOHRbJIc+L6YKMwfDtJAM9Vj9k0YY4muhuyUYk5tbk=
+ github.com/quic-go/qpack v0.6.0 h1:g7W+BMYynC1LbYLSqRt8PBg5Tgwxn214ZZR34VIOjz8=
+ github.com/quic-go/qpack v0.6.0/go.mod h1:lUpLKChi8njB4ty2bFLX2x4gzDqXwUpaO1DP9qMDZII=
+-github.com/quic-go/quic-go v0.59.0 h1:OLJkp1Mlm/aS7dpKgTc6cnpynnD2Xg7C1pwL6vy/SAw=
+-github.com/quic-go/quic-go v0.59.0/go.mod h1:upnsH4Ju1YkqpLXC305eW3yDZ4NfnNbmQRCMWS58IKU=
+ github.com/quic-go/quic-go v0.60.0 h1:xcQioE8OM66UQLeUMHltK1CCcOu3JbVB4JAQdDQSB+0=
+ github.com/quic-go/quic-go v0.60.0/go.mod h1:wpKpjmPpftl30sL6pFh7REVpjbcCVy4zt2vDyK1TuJk=
+ github.com/russross/blackfriday/v2 v2.1.0/go.mod h1:+Rmxgy9KzJVeS9/2gXHxylqXiyQDYRxCVz55jmeOWTM=
+@@ -32,12 +37,9 @@ github.com/spf13/pflag v1.0.10 h1:4EBh2KAYBwaONj6b2Ye1GiHfwjqyROoF4RwYO+vPwFk=
+ github.com/spf13/pflag v1.0.10/go.mod h1:McXfInJRrz4CZXVZOBLb0bTZqETkiAhM9Iw0y3An2Bg=
+ github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu7U=
+ github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
+-github.com/txthinking/runnergroup v0.0.0-20210608031112-152c7c4432bf h1:7PflaKRtU4np/epFxRXlFhlzLXZzKFrH5/I4so5Ove0=
+ github.com/txthinking/runnergroup v0.0.0-20210608031112-152c7c4432bf/go.mod h1:CLUSJbazqETbaR+i0YAhXBICV9TrKH93pziccMhmhpM=
+ github.com/txthinking/runnergroup v0.0.0-20250224021307-5864ffeb65ae h1:ArVM1jICfm7g4E4dBet+KHUFMLuxmj1Nxdp/tr3ByCU=
+ github.com/txthinking/runnergroup v0.0.0-20250224021307-5864ffeb65ae/go.mod h1:cldYm15/XHcGt7ndItnEWHwFZo7dinU+2QoyjfErhsI=
+-github.com/txthinking/socks5 v0.0.0-20251011041537-5c31f201a10e h1:xA7GVlbz6teIF4FdvuqwbX6C4tiqNk2PH7FRPIDerao=
+-github.com/txthinking/socks5 v0.0.0-20251011041537-5c31f201a10e/go.mod h1:ntmMHL/xPq1WLeKiw8p/eRATaae6PiVRNipHFJxI8PM=
+ github.com/txthinking/socks5 v0.0.0-20260601051520-339b044ab0eb h1:cFSmrCbLJPb87QrwDhUTnguVLezlIqDiJuY8xKcFZnw=
+ github.com/txthinking/socks5 v0.0.0-20260601051520-339b044ab0eb/go.mod h1:ntmMHL/xPq1WLeKiw8p/eRATaae6PiVRNipHFJxI8PM=
+ github.com/vishvananda/netlink v1.3.1 h1:3AEMt62VKqz90r0tmNhog0r/PpWKmrEShJU0wJW6bV0=
+@@ -52,33 +54,25 @@ go.uber.org/mock v0.6.0/go.mod h1:KiVJ4BqZJaMj4svdfmHM0AUx4NJYO8ZNpPnZn1Z+BBU=
+ go.yaml.in/yaml/v3 v3.0.4/go.mod h1:DhzuOOF2ATzADvBadXxruRBLzYTpT36CKvDb3+aBEFg=
+ golang.org/x/crypto v0.0.0-20190308221718-c2843e01d9a2/go.mod h1:djNgcEr1/C05ACkg1iLfiJU5Ep61QUkGW8qpdssI0+w=
+ golang.org/x/crypto v0.0.0-20210921155107-089bfa567519/go.mod h1:GvvjBRRGRdwPK5ydBHafDWAxML/pGHZbMvKqRZ5+Abc=
+-golang.org/x/crypto v0.49.0 h1:+Ng2ULVvLHnJ/ZFEq4KdcDd/cfjrrjjNSXNzxg0Y4U4=
+-golang.org/x/crypto v0.49.0/go.mod h1:ErX4dUh2UM+CFYiXZRTcMpEcN8b/1gxEuv3nODoYtCA=
+ golang.org/x/crypto v0.53.0 h1:QZ4Muo8THX6CizN2vPPd5fBGHyogrdK9fG4wLPFUsto=
+ golang.org/x/crypto v0.53.0/go.mod h1:DNLU434OwVakk9PzuwV8w62mAJpRJL3vsgcfp4Qnsio=
+-golang.org/x/exp v0.0.0-20260312153236-7ab1446f8b90 h1:jiDhWWeC7jfWqR9c/uplMOqJ0sbNlNWv0UkzE0vX1MA=
+-golang.org/x/exp v0.0.0-20260312153236-7ab1446f8b90/go.mod h1:xE1HEv6b+1SCZ5/uscMRjUBKtIxworgEcEi+/n9NQDQ=
+ golang.org/x/exp v0.0.0-20260611194520-c48552f49976 h1:X8Hz2ImujgbmetVuW+w2YkyZChE3cBpZi2P158rTG9M=
+ golang.org/x/exp v0.0.0-20260611194520-c48552f49976/go.mod h1:vnf4pv9iKZXY58sQE1L86zmNWJ4159e1RkcWiLCkeEY=
+ golang.org/x/mod v0.6.0-dev.0.20220419223038-86c51ed26bb4/go.mod h1:jJ57K6gSWd91VN4djpZkiMVwK6gcyfeH4XE8wZrZaV4=
+ golang.org/x/mod v0.7.0/go.mod h1:iBbtSCu2XBx23ZKBPSOrRkjjQPZFPuis4dIYUhu/chs=
+-golang.org/x/mod v0.34.0 h1:xIHgNUUnW6sYkcM5Jleh05DvLOtwc6RitGHbDk4akRI=
+-golang.org/x/mod v0.34.0/go.mod h1:ykgH52iCZe79kzLLMhyCUzhMci+nQj+0XkbXpNYtVjY=
+ golang.org/x/mod v0.37.0 h1:vF1DjpVEshcIqoEaauuHebaLk1O1forxjxBaVn884JQ=
++golang.org/x/mod v0.37.0/go.mod h1:m8S8VeM9r4dzDwjrKO0a1sZP3YjeMamRRlD+fmR2Q/0=
+ golang.org/x/net v0.0.0-20190620200207-3b0461eec859/go.mod h1:z5CRVTTTmAJ677TzLLGU+0bjPO0LkuOLi4/5GtJWs/s=
+ golang.org/x/net v0.0.0-20210226172049-e18ecbb05110/go.mod h1:m0MpNAwzfU5UDzcl9v0D8zg8gWTRqZa9RBIspLL5mdg=
+ golang.org/x/net v0.0.0-20220722155237-a158d28d115b/go.mod h1:XRhObCWvk6IyKnWLug+ECip1KBveYUHfp+8e9klMJ9c=
+ golang.org/x/net v0.2.0/go.mod h1:KqCZLdyyvdV855qA2rE3GC2aiw5xGR5TEjj8smXukLY=
+-golang.org/x/net v0.52.0 h1:He/TN1l0e4mmR3QqHMT2Xab3Aj3L9qjbhRm78/6jrW0=
+-golang.org/x/net v0.52.0/go.mod h1:R1MAz7uMZxVMualyPXb+VaqGSa3LIaUqk0eEt3w36Sw=
+ golang.org/x/net v0.56.0 h1:Rw8j/hFzGvJUZwNBXnAtf5sVDVt+65SK2C7IxCxZt5o=
+ golang.org/x/net v0.56.0/go.mod h1:D3Ku6r+V6JROoZK144D2XfMHFcMq/0zSfLelVTCFKec=
+ golang.org/x/sync v0.0.0-20190423024810-112230192c58/go.mod h1:RxMgew5VJxzue5/jJTE5uejpjVlOe/izrB70Jof72aM=
+ golang.org/x/sync v0.0.0-20220722155255-886fb9371eb4/go.mod h1:RxMgew5VJxzue5/jJTE5uejpjVlOe/izrB70Jof72aM=
+ golang.org/x/sync v0.1.0/go.mod h1:RxMgew5VJxzue5/jJTE5uejpjVlOe/izrB70Jof72aM=
+-golang.org/x/sync v0.20.0 h1:e0PTpb7pjO8GAtTs2dQ6jYa5BWYlMuX047Dco/pItO4=
+-golang.org/x/sync v0.20.0/go.mod h1:9xrNwdLfx4jkKbNva9FpL6vEN7evnE43NNNJQ2LF3+0=
+ golang.org/x/sync v0.21.0 h1:HLII4xRRTtCRkxYp4HNFF0Js/Og6q2i++KXbg0gHCwM=
++golang.org/x/sync v0.21.0/go.mod h1:9xrNwdLfx4jkKbNva9FpL6vEN7evnE43NNNJQ2LF3+0=
+ golang.org/x/sys v0.0.0-20190215142949-d0b11bdaac8a/go.mod h1:STP8DvDyc/dI5b8T5hshtkjS+E42TnysNCUPdjciGhY=
+ golang.org/x/sys v0.0.0-20201119102817-f84b799fce68/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=
+ golang.org/x/sys v0.0.0-20210615035016-665e8c7367d1/go.mod h1:oPkhp1MJrh7nUepCBck5+mAzfO9JrbApNNgaTdGDITg=
+@@ -86,8 +80,6 @@ golang.org/x/sys v0.0.0-20220520151302-bc2c85ada10a/go.mod h1:oPkhp1MJrh7nUepCBc
+ golang.org/x/sys v0.0.0-20220722155257-8c9f86f7a55f/go.mod h1:oPkhp1MJrh7nUepCBck5+mAzfO9JrbApNNgaTdGDITg=
+ golang.org/x/sys v0.2.0/go.mod h1:oPkhp1MJrh7nUepCBck5+mAzfO9JrbApNNgaTdGDITg=
+ golang.org/x/sys v0.10.0/go.mod h1:oPkhp1MJrh7nUepCBck5+mAzfO9JrbApNNgaTdGDITg=
+-golang.org/x/sys v0.42.0 h1:omrd2nAlyT5ESRdCLYdm3+fMfNFE/+Rf4bDIQImRJeo=
+-golang.org/x/sys v0.42.0/go.mod h1:4GL1E5IUh+htKOUEOaiffhrAeqysfVGipDYzABqnCmw=
+ golang.org/x/sys v0.46.0 h1:noSf2Fq6F8DBgS+LysIkx7rIExoNHJsxOAtPp4rthXw=
+ golang.org/x/sys v0.46.0/go.mod h1:4GL1E5IUh+htKOUEOaiffhrAeqysfVGipDYzABqnCmw=
+ golang.org/x/term v0.0.0-20201126162022-7de9c90e9dd1/go.mod h1:bj7SfCRtBDWHUb9snDiAeCFNEtKQo2Wmx5Cou7ajbmo=
+@@ -97,8 +89,6 @@ golang.org/x/text v0.3.0/go.mod h1:NqM8EUOU14njkJ3fqMW+pc6Ldnwhi/IjpwHt7yyuwOQ=
+ golang.org/x/text v0.3.3/go.mod h1:5Zoc/QRtKVWzQhOtBMvqHzDpF6irO9z98xDceosuGiQ=
+ golang.org/x/text v0.3.7/go.mod h1:u+2+/6zg+i71rQMx5EYifcz6MCKuco9NR6JIITiCfzQ=
+ golang.org/x/text v0.4.0/go.mod h1:mrYo+phRRbMaCq/xk9113O4dZlRixOauAjOtrjsXDZ8=
+-golang.org/x/text v0.35.0 h1:JOVx6vVDFokkpaq1AEptVzLTpDe9KGpj5tR4/X+ybL8=
+-golang.org/x/text v0.35.0/go.mod h1:khi/HExzZJ2pGnjenulevKNX1W67CUy0AsXcNubPGCA=
+ golang.org/x/text v0.38.0 h1:sXmwo9DwP3OK9EZ7PqAdaooSGozfl/3a6/xJcbzPRhE=
+ golang.org/x/text v0.38.0/go.mod h1:YXZt3QhHUKYT53r2lLKFIVi6Ao1jdzrTR/KQ09qyxF4=
+ golang.org/x/time v0.15.0 h1:bbrp8t3bGUeFOx08pvsMYRTCVSMk89u4tKbNOZbp88U=
+@@ -107,22 +97,15 @@ golang.org/x/tools v0.0.0-20180917221912-90fa682c2a6e/go.mod h1:n7NCudcB/nEzxVGm
+ golang.org/x/tools v0.0.0-20191119224855-298f0cb1881e/go.mod h1:b+2E5dAYhXwXZwtnZ6UAqBI28+e2cm9otk0dWdXHAEo=
+ golang.org/x/tools v0.1.12/go.mod h1:hNGJHUnrk76NpqgfD5Aqm5Crs+Hm0VOH/i9J2+nxYbc=
+ golang.org/x/tools v0.3.0/go.mod h1:/rWhSS2+zyEVwoJf8YAX6L2f0ntZ7Kn/mGgAWcipA5k=
+-golang.org/x/tools v0.43.0 h1:12BdW9CeB3Z+J/I/wj34VMl8X+fEXBxVR90JeMX5E7s=
+-golang.org/x/tools v0.43.0/go.mod h1:uHkMso649BX2cZK6+RpuIPXS3ho2hZo4FVwfoy1vIk0=
+ golang.org/x/tools v0.46.0 h1:7jTurBkPZu4moS/Uy4OQT1M+QBlsj3wejyZwsT8Z7rk=
++golang.org/x/tools v0.46.0/go.mod h1:FrD85F8l+NWL+9XWBSyVSHO6Ne4jutsfIFba7AWQ5Ys=
+ golang.org/x/xerrors v0.0.0-20190717185122-a985d3407aa7/go.mod h1:I/5z698sn9Ka8TeJc9MKroUUfqBBauWjQqLJ2OPfmY0=
+ golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2 h1:B82qJJgjvYKsXS9jeunTOisW56dUokqW/FOteYJJ/yg=
+ golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2/go.mod h1:deeaetjYA+DHMHg+sMSMI58GrEteJUUzzw7en6TJQcI=
+-golang.zx2c4.com/wireguard v0.0.0-20250521234502-f333402bd9cb h1:whnFRlWMcXI9d+ZbWg+4sHnLp52d5yiIPUxMBSt4X9A=
+-golang.zx2c4.com/wireguard v0.0.0-20250521234502-f333402bd9cb/go.mod h1:rpwXGsirqLqN2L0JDJQlwOboGHmptD5ZD6T2VmcqhTw=
+ golang.zx2c4.com/wireguard v0.0.0-20260522210424-ecfc5a8d5446 h1:cqHQ3AycTHvM2R7ikgyX57D+XvtcSnGylsLkOVhta/w=
+ golang.zx2c4.com/wireguard v0.0.0-20260522210424-ecfc5a8d5446/go.mod h1:rpwXGsirqLqN2L0JDJQlwOboGHmptD5ZD6T2VmcqhTw=
+ gopkg.in/check.v1 v0.0.0-20161208181325-20d25e280405/go.mod h1:Co6ibVJAznAaIkqp8huTwlJQCZ016jof/cbN4VW5Yz0=
+ gopkg.in/yaml.v3 v3.0.1 h1:fxVm/GzAzEWqLHuvctI91KS9hhNmmWOoWu0XTYJS7CA=
+ gopkg.in/yaml.v3 v3.0.1/go.mod h1:K4uyk7z7BCEPqu6E+C64Yfv1cQ7kz7rIZviUmN+EgEM=
+-gvisor.dev/gvisor v0.0.0-20260408064518-65a410b0d584 h1:QyFROp5Ew7XZWKPtp8ap78z4gpY6xHpJIEdHgVA4bzA=
+-gvisor.dev/gvisor v0.0.0-20260408064518-65a410b0d584/go.mod h1:xQ2PWgHmWJA/Ph4i1q1jBm39BKhc3W0DXqWoDSyuBOY=
+ gvisor.dev/gvisor v0.0.0-20260616165937-8e4bc62602eb h1:TJ8BuwC+RUuKZgRETtxPjRk8e2Kj3kH08I73AKIdOFY=
+ gvisor.dev/gvisor v0.0.0-20260616165937-8e4bc62602eb/go.mod h1:8aLQqUBHDH8fY5y60lzmwDpMMbQCcT3EBfoSwhfaGCY=
+-gvisor.dev/gvisor v0.0.0-20260616180030-d0704584a116 h1:c5Z2VBmAsWhqjDGlNTR0T95QvOkHdcMMkwZRA1dqlGM=
+-gvisor.dev/gvisor v0.0.0-20260616180030-d0704584a116/go.mod h1:8aLQqUBHDH8fY5y60lzmwDpMMbQCcT3EBfoSwhfaGCY=

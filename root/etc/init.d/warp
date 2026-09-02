@@ -20,10 +20,10 @@ start_service() {
 	config_get backend main actual_backend ''
 	config_get interface_name main actual_interface warp
 	config_get mtu main mtu 1280
-	config_get keepalive main keepalive 25
+	config_get keepalive main keepalive 5
 	config_get_bool ipv4 main ipv4 1
 	config_get_bool ipv6 main ipv6 1
-	config_get transport main masque_transport quic
+	config_get transport main masque_transport http2
 	config_get sni main masque_sni ozon.ru
 	[ -n "$sni" ] || sni=ozon.ru
 	[ "$backend" = usque_masque ] || return 0
@@ -42,6 +42,7 @@ start_service() {
 		--keepalive-period "${keepalive}s" --reconnect-delay 1s \
 		--always-reconnect --sni-address "$sni"
 	[ "$transport" != http2 ] || procd_append_param command --http2
+	[ "$transport" != auto ] || procd_append_param command --http2-fallback
 	[ "$ipv4" -eq 1 ] || procd_append_param command --no-tunnel-ipv4
 	[ "$ipv6" -eq 1 ] || procd_append_param command --no-tunnel-ipv6
 	procd_set_param file "$config_file"

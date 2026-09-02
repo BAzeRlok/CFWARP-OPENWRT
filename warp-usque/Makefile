@@ -1,12 +1,12 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=warp-usque
-PKG_VERSION:=3.0.1
+PKG_VERSION:=4.2.1
 PKG_RELEASE:=1
 
 PKG_SOURCE:=usque-$(PKG_VERSION).tar.gz
 PKG_SOURCE_URL:=https://codeload.github.com/Diniboy1123/usque/tar.gz/refs/tags/v$(PKG_VERSION)?
-PKG_HASH:=d9764ef667e3db08c2126daa851fc81fef5017030206ec22d447638368146b97
+PKG_HASH:=cd0e9c89353915cb74a0877ab6fc68ee158adf8724ef9aab878a4d90edcb1d72
 PKG_BUILD_DIR:=$(BUILD_DIR)/usque-$(PKG_VERSION)
 
 PKG_LICENSE:=MIT
