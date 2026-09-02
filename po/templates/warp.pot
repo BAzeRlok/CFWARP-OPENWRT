@@ -1,6 +1,6 @@
 msgid ""
 msgstr ""
-"Project-Id-Version: luci-app-warp 1.7.2\n"
+"Project-Id-Version: luci-app-warp 1.7.3\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 
 #: htdocs/luci-static/resources/view/warp/overview.js:47

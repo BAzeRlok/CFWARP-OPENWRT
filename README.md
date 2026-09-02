@@ -18,7 +18,7 @@ route или kill switch. Выбор трафика для интерфейса 
 wget -qO- https://raw.githubusercontent.com/BAzeRlok/CFWARP-OPENWRT/main/install.sh | sh
 ```
 
-Он скачивает APK из GitHub Release `v1.7.2`, автоматически выбирает вариант
+Он скачивает APK из GitHub Release `v1.7.3`, автоматически выбирает вариант
 backend по пакетной архитектуре `DISTRIB_ARCH`, проверяет SHA-256, устанавливает
 пакеты и запускает регистрацию. По умолчанию используется QUIC/HTTP3 с
 keepalive 5 секунд и маскирующим SNI `ozon.ru`. HTTP/2 использует канонический
@@ -49,6 +49,9 @@ sh /tmp/cfwarp-install.sh
 - поддерживает QUIC/HTTP3 и TCP/HTTP2 для MASQUE;
 - устанавливает HTTP/2 через проверенный на WARP plain CONNECT и передаёт IP-
   пакеты в Capsule Protocol DATA frames без высокоуровневого `http.Client`;
+- использует приватный wire format Cloudflare только с
+  `cf-connect-proto: cf-connect-ip`, без несовместимого объявления RFC
+  `capsule-protocol`, и сохраняет `TCP_NODELAY` для малых DATA frames;
 - отдельно обрабатывает HTTP/2 SETTINGS, flow control, PING, GOAWAY и
   `RST_STREAM`, чтобы соединение не превращалось в молчащий data plane;
 - для HTTP/2 всегда использует канонический SNI
@@ -86,16 +89,16 @@ Backend работает автономно и не читает конфигу�
 
 ## Ручная установка
 
-Скачайте из GitHub Release `v1.7.2` файл `SHA256SUMS`, два LuCI-пакета и
+Скачайте из GitHub Release `v1.7.3` файл `SHA256SUMS`, два LuCI-пакета и
 вариант `warp-usque`, соответствующий `DISTRIB_ARCH` из `/etc/openwrt_release`.
 
 ```sh
 ARCH="$(sed -n 's/^DISTRIB_ARCH=//p' /etc/openwrt_release | tr -d "'\"")"
-USQUE_PACKAGE="warp-usque-4.2.1-r5-$ARCH.apk"
+USQUE_PACKAGE="warp-usque-4.2.1-r6-$ARCH.apk"
 for PACKAGE in \
     "$USQUE_PACKAGE" \
-    luci-app-warp-1.7.2-r1.apk \
-    luci-i18n-warp-ru-26.245.49260.5baa687.apk
+    luci-app-warp-1.7.3-r1.apk \
+    luci-i18n-warp-ru-26.245.63070.4c74f1f.apk
 do
     EXPECTED="$(awk -v name="$PACKAGE" '$2 == name { print $1; exit }' SHA256SUMS)"
     ACTUAL="$(sha256sum "$PACKAGE" | awk '{ print $1 }')"
@@ -104,8 +107,8 @@ done
 
 apk add --allow-untrusted \
     "./$USQUE_PACKAGE" \
-    ./luci-app-warp-1.7.2-r1.apk \
-    ./luci-i18n-warp-ru-26.245.49260.5baa687.apk
+    ./luci-app-warp-1.7.3-r1.apk \
+    ./luci-i18n-warp-ru-26.245.63070.4c74f1f.apk
 
 uci set warp.main.masque_transport='quic'
 uci set warp.main.masque_sni='ozon.ru'
