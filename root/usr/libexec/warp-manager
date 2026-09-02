@@ -126,7 +126,7 @@ validate_settings() {
 	CFG_KEEPALIVE=$(cfg_get keepalive 5)
 	CFG_IPV4=$(cfg_get ipv4 1)
 	CFG_IPV6=$(cfg_get ipv6 1)
-	CFG_MASQUE_TRANSPORT=$(cfg_get masque_transport http2)
+	CFG_MASQUE_TRANSPORT=$(cfg_get masque_transport quic)
 	CFG_MASQUE_SNI=$(cfg_get masque_sni ozon.ru)
 	CFG_ACTUAL=$(cfg_get actual_interface '')
 	CFG_BACKEND=$(cfg_get actual_backend '')

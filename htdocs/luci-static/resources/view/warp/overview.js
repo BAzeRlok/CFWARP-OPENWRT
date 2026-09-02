@@ -259,9 +259,9 @@ return view.extend({
 		option.value('auto', _('Automatic fallback (QUIC → HTTP/2)'));
 		option.value('quic', _('QUIC / HTTP/3'));
 		option.value('http2', _('TCP / HTTP/2'));
-		option.default = 'http2';
+		option.default = 'quic';
 		option.rmempty = false;
-		option.description = _('HTTP/2 is recommended for stability. Automatic mode starts with QUIC and permanently switches to HTTP/2 after the first QUIC failure.');
+		option.description = _('QUIC is recommended when it works on your network. Automatic mode switches to HTTP/2 only after three consecutive QUIC connection failures.');
 
 		option = section.taboption('advanced', form.Value, 'masque_sni', _('MASQUE SNI'));
 		option.placeholder = 'ozon.ru';

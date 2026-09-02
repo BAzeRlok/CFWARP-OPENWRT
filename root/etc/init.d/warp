@@ -23,7 +23,7 @@ start_service() {
 	config_get keepalive main keepalive 5
 	config_get_bool ipv4 main ipv4 1
 	config_get_bool ipv6 main ipv6 1
-	config_get transport main masque_transport http2
+	config_get transport main masque_transport quic
 	config_get sni main masque_sni ozon.ru
 	[ -n "$sni" ] || sni=ozon.ru
 	[ "$backend" = usque_masque ] || return 0
@@ -39,7 +39,7 @@ start_service() {
 	procd_open_instance warp
 	procd_set_param command "$prog" --config "$config_file" nativetun \
 		--interface-name "$interface_name" --mtu "$mtu" \
-		--keepalive-period "${keepalive}s" --reconnect-delay 1s \
+		--keepalive-period "${keepalive}s" --reconnect-delay 250ms \
 		--always-reconnect --sni-address "$sni"
 	[ "$transport" != http2 ] || procd_append_param command --http2
 	[ "$transport" != auto ] || procd_append_param command --http2-fallback

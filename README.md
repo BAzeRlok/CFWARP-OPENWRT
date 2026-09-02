@@ -18,10 +18,10 @@ route или kill switch. Выбор трафика для интерфейса 
 wget -qO- https://raw.githubusercontent.com/BAzeRlok/CFWARP-OPENWRT/main/install.sh | sh
 ```
 
-Он скачивает APK из GitHub Release `v1.6.0`, автоматически выбирает вариант
+Он скачивает APK из GitHub Release `v1.6.1`, автоматически выбирает вариант
 backend по пакетной архитектуре `DISTRIB_ARCH`, проверяет SHA-256, устанавливает
-пакеты и запускает регистрацию. По умолчанию используется стабильный
-TCP/HTTP2-транспорт и SNI `ozon.ru`. Для адаптивного режима QUIC → HTTP/2:
+пакеты и запускает регистрацию. По умолчанию используется QUIC/HTTP3 с
+keepalive 5 секунд и SNI `ozon.ru`. Для адаптивного режима QUIC → HTTP/2:
 
 ```sh
 wget -qO- https://raw.githubusercontent.com/BAzeRlok/CFWARP-OPENWRT/main/install.sh | WARP_TRANSPORT=auto sh
@@ -45,8 +45,10 @@ sh /tmp/cfwarp-install.sh
 - принудительно использует IPv4 для регистрации;
 - корректно фиксирует ALPN `http/1.1` для служебного HTTP-клиента;
 - поддерживает QUIC/HTTP3 и TCP/HTTP2 для MASQUE;
-- в адаптивном режиме после первого сбоя QUIC закрепляется на HTTP/2;
-- поддерживает HTTP/2 PING и TCP keepalive для длинных соединений;
+- в адаптивном режиме переключается на HTTP/2 только после трёх подряд ошибок
+  установления QUIC, но не после обычного idle-разрыва рабочего туннеля;
+- использует TCP keepalive без несовместимых с Cloudflare HTTP/2 PING-таймеров;
+- сохраняет очередь исходящих пакетов и единственный TUN reader между reconnect;
 - сохраняет проверку сертификата API и проверку endpoint по публичному ключу.
 
 Backend работает автономно и не читает конфигурацию сторонних средств обхода,
@@ -72,16 +74,16 @@ Backend работает автономно и не читает конфигу�
 
 ## Ручная установка
 
-Скачайте из GitHub Release `v1.6.0` файл `SHA256SUMS`, два LuCI-пакета и
+Скачайте из GitHub Release `v1.6.1` файл `SHA256SUMS`, два LuCI-пакета и
 вариант `warp-usque`, соответствующий `DISTRIB_ARCH` из `/etc/openwrt_release`.
 
 ```sh
 ARCH="$(sed -n 's/^DISTRIB_ARCH=//p' /etc/openwrt_release | tr -d "'\"")"
-USQUE_PACKAGE="warp-usque-4.2.1-r1-$ARCH.apk"
+USQUE_PACKAGE="warp-usque-4.2.1-r2-$ARCH.apk"
 for PACKAGE in \
     "$USQUE_PACKAGE" \
-    luci-app-warp-1.6.0-r1.apk \
-    luci-i18n-warp-ru-26.245.22761.62cf6a9.apk
+    luci-app-warp-1.6.1-r1.apk \
+    luci-i18n-warp-ru-26.245.26448.2364f57.apk
 do
     EXPECTED="$(awk -v name="$PACKAGE" '$2 == name { print $1; exit }' SHA256SUMS)"
     ACTUAL="$(sha256sum "$PACKAGE" | awk '{ print $1 }')"
@@ -90,10 +92,10 @@ done
 
 apk add --allow-untrusted \
     "./$USQUE_PACKAGE" \
-    ./luci-app-warp-1.6.0-r1.apk \
-    ./luci-i18n-warp-ru-26.245.22761.62cf6a9.apk
+    ./luci-app-warp-1.6.1-r1.apk \
+    ./luci-i18n-warp-ru-26.245.26448.2364f57.apk
 
-uci set warp.main.masque_transport='http2'
+uci set warp.main.masque_transport='quic'
 uci set warp.main.masque_sni='ozon.ru'
 uci commit warp
 
@@ -138,13 +140,15 @@ config warp 'main'
         option keepalive '5'
         option ipv4 '1'
         option ipv6 '1'
-        option masque_transport 'http2'
+        option masque_transport 'quic'
         option masque_sni 'ozon.ru'
 ```
 
 `masque_transport` принимает `auto`, `quic` или `http2`. В режиме `auto`
-backend начинает с QUIC и после первого сетевого сбоя до перезапуска службы
-использует HTTP/2. Поле `masque_sni` содержит только DNS-имя без схемы и порта.
+backend начинает с QUIC и переходит на HTTP/2 только после трёх последовательных
+ошибок установления QUIC. Разрыв уже работавшего QUIC-туннеля вызывает быстрое
+переподключение тем же транспортом. Поле `masque_sni` содержит только DNS-имя
+без схемы и порта.
 
 ## Удаление
 

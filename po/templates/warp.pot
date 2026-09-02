@@ -1,6 +1,6 @@
 msgid ""
 msgstr ""
-"Project-Id-Version: luci-app-warp 1.6.0\n"
+"Project-Id-Version: luci-app-warp 1.6.1\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 
 #: htdocs/luci-static/resources/view/warp/overview.js:47
@@ -409,8 +409,8 @@ msgstr ""
 
 #: htdocs/luci-static/resources/view/warp/overview.js:264
 msgid ""
-"HTTP/2 is recommended for stability. Automatic mode starts with QUIC and "
-"permanently switches to HTTP/2 after the first QUIC failure."
+"QUIC is recommended when it works on your network. Automatic mode switches "
+"to HTTP/2 only after three consecutive QUIC connection failures."
 msgstr ""
 
 #: htdocs/luci-static/resources/view/warp/overview.js:250
