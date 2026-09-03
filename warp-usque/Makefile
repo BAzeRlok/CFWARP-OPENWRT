@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=warp-usque
 PKG_VERSION:=4.2.1
-PKG_RELEASE:=8
+PKG_RELEASE:=9
 
 PKG_SOURCE:=usque-$(PKG_VERSION).tar.gz
 PKG_SOURCE_URL:=https://codeload.github.com/Diniboy1123/usque/tar.gz/refs/tags/v$(PKG_VERSION)?
@@ -32,8 +32,8 @@ define Package/warp-usque
 endef
 
 define Package/warp-usque/description
-  A private QUIC-only instance of usque for luci-app-warp with Cloudflare
-  registration anti-DPI and a low-latency reconnect-safe packet path.
+  A private QUIC-only usque backend for luci-app-warp with registration
+  anti-DPI and fast SACK-assisted TCP recovery.
 endef
 
 define Package/warp-usque/install

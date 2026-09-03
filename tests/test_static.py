@@ -103,6 +103,7 @@ class PackageTests(unittest.TestCase):
         package = (ROOT / "warp-usque/Makefile").read_text(encoding="utf-8")
         patch = (ROOT / "warp-usque/patches/100-antidpi-cloudflare-api.patch").read_text(encoding="utf-8")
         quic_patch = (ROOT / "warp-usque/patches/110-quic-only-stability.patch").read_text(encoding="utf-8")
+        sack_patch = (ROOT / "warp-usque/patches/120-sack-recovery.patch").read_text(encoding="utf-8")
         self.assertIn('USQUE_BIN="${WARP_USQUE_BIN:-/usr/libexec/warp-usque}"', manager)
         self.assertIn("set warp.main.actual_backend='usque_masque'", manager)
         self.assertIn('usque_profile_valid "$temp_usque_config"', manager)
@@ -112,7 +113,7 @@ class PackageTests(unittest.TestCase):
         self.assertNotIn("/etc/config/zapret", manager + init)
         self.assertNotIn("/opt/zapret", manager + init)
         self.assertIn("PKG_VERSION:=4.2.1", package)
-        self.assertIn("PKG_RELEASE:=8", package)
+        self.assertIn("PKG_RELEASE:=9", package)
         self.assertIn("PKG_HASH:=cd0e9c89353915cb74a0877ab6fc68ee158adf8724ef9aab878a4d90edcb1d72", package)
         self.assertIn("HelloChrome_Auto", patch)
         self.assertIn("forceHTTP1ALPN", patch)
@@ -125,9 +126,12 @@ class PackageTests(unittest.TestCase):
         self.assertIn("TestDevicePacketQueueStaysLowLatency", quic_patch)
         self.assertIn('-\tUseHTTP2          bool', quic_patch)
         self.assertIn('-\tnativeTunCmd.Flags().Bool("http2"', quic_patch)
+        self.assertIn("sackRecoveryCopies = 3", sack_patch)
+        self.assertIn("func tcpSACKRecoveryCopies", sack_patch)
+        self.assertIn("TestTCPSACKRecoveryCopies", sack_patch)
         self.assertEqual(
             sorted(path.name for path in (ROOT / "warp-usque/patches").glob("*.patch")),
-            ["100-antidpi-cloudflare-api.patch", "110-quic-only-stability.patch"],
+            ["100-antidpi-cloudflare-api.patch", "110-quic-only-stability.patch", "120-sack-recovery.patch"],
         )
         for text in [manager, init, (ROOT / "root/etc/config/warp").read_text(encoding="utf-8"), frontend]:
             self.assertNotRegex(text, re.compile(r"http.?2|masque_transport", re.I))
@@ -180,7 +184,7 @@ class PackageTests(unittest.TestCase):
         makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
         self.assertIn("LUCI_PKGARCH:=all", makefile)
         self.assertIn("LUCI_NAME:=luci-app-warp", makefile)
-        self.assertIn("LUCI_EXTRA_DEPENDS:=kmod-tun (>=0), warp-usque (>=4.2.1-r8)", makefile)
+        self.assertIn("LUCI_EXTRA_DEPENDS:=kmod-tun (>=0), warp-usque (>=4.2.1-r9)", makefile)
         self.assertNotIn("+kmod-tun", makefile)
         self.assertNotIn("+warp-usque", makefile)
         self.assertNotIn("+wireguard-tools", makefile)
@@ -193,10 +197,10 @@ class PackageTests(unittest.TestCase):
     def test_installer_selects_supported_arm64_package(self):
         installer = (ROOT / "install.sh").read_text(encoding="utf-8")
         self.assertIn("aarch64|aarch64_cortex-a53)", installer)
-        self.assertIn('USQUE_PACKAGE="warp-usque-4.2.1-r8-$ARCH.apk"', installer)
+        self.assertIn('USQUE_PACKAGE="warp-usque-4.2.1-r9-$ARCH.apk"', installer)
         self.assertIn("DISTRIB_ARCH", installer)
         self.assertIn("OPENWRT_ARCH", installer)
-        self.assertIn('RELEASE_TAG="v2.0.0"', installer)
+        self.assertIn('RELEASE_TAG="v2.0.1"', installer)
         self.assertNotIn("WARP_TRANSPORT", installer)
         self.assertNotRegex(installer, re.compile(r"http.?2|masque_transport", re.I))
 

@@ -4,10 +4,10 @@ set -eu
 umask 077
 
 REPOSITORY="BAzeRlok/CFWARP-OPENWRT"
-RELEASE_TAG="v2.0.0"
+RELEASE_TAG="v2.0.1"
 RELEASE_URL="https://github.com/$REPOSITORY/releases/download/$RELEASE_TAG"
-LUCI_PACKAGE="luci-app-warp-2.0.0-r1.apk"
-I18N_PACKAGE="luci-i18n-warp-ru-26.245.67241.b6a6f76.apk"
+LUCI_PACKAGE="luci-app-warp-2.0.1-r1.apk"
+I18N_PACKAGE="luci-i18n-warp-ru-26.245.69200.09cef59.apk"
 MASQUE_SNI="${WARP_SNI:-ozon.ru}"
 
 die() {
@@ -48,7 +48,7 @@ fi
 [ -n "$ARCH" ] || ARCH=$(apk --print-arch 2>/dev/null | sed -n '1p')
 case "$ARCH" in
 	aarch64|aarch64_cortex-a53)
-		USQUE_PACKAGE="warp-usque-4.2.1-r8-$ARCH.apk"
+		USQUE_PACKAGE="warp-usque-4.2.1-r9-$ARCH.apk"
 		;;
 	*)
 		die "для архитектуры $ARCH пока нет warp-usque; поддерживаются aarch64 и aarch64_cortex-a53"

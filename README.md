@@ -19,8 +19,8 @@ wget -qO- https://raw.githubusercontent.com/BAzeRlok/CFWARP-OPENWRT/main/install
 WARP_SNI=www.apple.com sh
 ```
 
-Установщик скачивает релиз `v2.0.0`, проверяет SHA-256, устанавливает
-`warp-usque` 4.2.1-r8 и `luci-app-warp` 2.0.0-r1, затем регистрирует и
+Установщик скачивает релиз `v2.0.1`, проверяет SHA-256, устанавливает
+`warp-usque` 4.2.1-r9 и `luci-app-warp` 2.0.1-r1, затем регистрирует и
 запускает WARP.
 
 ## Использование
@@ -63,6 +63,8 @@ logread -e warp-usque -e warp
 
 - приватный ключ хранится в `/etc/warp/usque.json` с правами `0600`;
 - endpoint проверяется по закреплённому публичному ключу Cloudflare;
+- SACK-подтверждения повторяются только при обнаруженной потере TCP-сегмента,
+  сокращая ожидание повторной передачи на нестабильном QUIC-канале;
 - backend изолирован от установленного пользователем sing-box;
 - WireGuard, Zapret, PBR и firewall пакет автоматически не настраивает;
 - туннельный транспорт только один: MASQUE over QUIC.
