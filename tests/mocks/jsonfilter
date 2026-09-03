@@ -18,13 +18,9 @@ if source is None or expression is None:
 with open(source, "r", encoding="utf-8") as stream:
     value = json.load(stream)
 
-paths = {
-    "@.id": ["id"],
-    "@.access_token": ["access_token"],
-}
-path = paths.get(expression)
-if path is None:
+if not expression.startswith("@."):
     raise SystemExit(1)
+path = expression[2:].split(".")
 for component in path:
     value = value[component]
 print(value)

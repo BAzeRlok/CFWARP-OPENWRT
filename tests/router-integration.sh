@@ -44,16 +44,19 @@ assert_managed_config() {
 	[ "$(uci -q get network.$name.defaultroute)" = 0 ]
 	[ "$(uci -q get network.$name.peerdns)" = 0 ]
 	[ -r "/sys/class/net/$name/tun_flags" ]
-	[ "$backend" = usque_masque ]
-	[ -s /etc/warp/usque.json ]
-	[ "$(stat -c '%a' /etc/warp/usque.json)" = 600 ]
+	[ "$backend" = amneziawg ]
+	[ -s /etc/warp/awg-account.json ]
+	[ -s /etc/warp/awg.conf ]
+	[ "$(stat -c '%a' /etc/warp/awg-account.json)" = 600 ]
+	[ "$(stat -c '%a' /etc/warp/awg.conf)" = 600 ]
+	/usr/libexec/warp-awgctl get "$name" endpoint | grep -Eq '^[0-9.]+:[0-9]+$'
 	! uci show firewall | grep -Eq "(^|[.='])${name}([.=' ]|$)"
 }
 
 case "$phase" in
 	pre-reboot)
 		snapshot before-reboot
-		sha256sum /etc/warp/usque.json >"$work/registration.sha256"
+		sha256sum /etc/warp/awg-account.json >"$work/registration.sha256"
 		echo 'Snapshots saved. Reboot, then run this script with post-reboot.'
 		exit 0
 		;;
@@ -62,7 +65,7 @@ case "$phase" in
 		assert_managed_config
 		name=$(uci -q get warp.main.actual_interface)
 		ubus call "network.interface.$name" status | jsonfilter -e '@.up' | grep -qx true
-		echo 'Reboot persistence test: OK (registration unchanged and MASQUE TUN up).'
+		echo 'Reboot persistence test: OK (registration unchanged and AWG TUN up).'
 		exit 0
 		;;
 	full) ;;
@@ -97,14 +100,16 @@ printf '%s' "$result" | jsonfilter -e '@.ok' | grep -qx true
 assert_managed_config
 name=$(uci -q get warp.main.actual_interface)
 [ "$name" != warp ]
+curl -4 --interface "$name" --connect-timeout 10 --max-time 20 \
+	https://1.1.1.1/cdn-cgi/trace | grep -qx 'warp=on'
 uci -q show network.warp >"$work/conflict.connected"
 diff -u "$work/conflict.before" "$work/conflict.connected"
 snapshot connected
 assert_unchanged connected
 
-registration_hash=$(sha256sum /etc/warp/usque.json | cut -d' ' -f1)
+registration_hash=$(sha256sum /etc/warp/awg-account.json | cut -d' ' -f1)
 $manager register >/dev/null
-[ "$registration_hash" = "$(sha256sum /etc/warp/usque.json | cut -d' ' -f1)" ]
+[ "$registration_hash" = "$(sha256sum /etc/warp/awg-account.json | cut -d' ' -f1)" ]
 
 $manager disable >/dev/null
 [ -e /etc/warp/disabled ]
@@ -113,8 +118,8 @@ $manager reconnect >/dev/null
 snapshot reconnected
 assert_unchanged reconnected
 
-private_key=$(jsonfilter -i /etc/warp/usque.json -e '@.private_key')
-token=$(jsonfilter -i /etc/warp/usque.json -e '@.access_token')
+private_key=$(jsonfilter -i /etc/warp/awg-account.json -e '@.private_key')
+token=$(jsonfilter -i /etc/warp/awg-account.json -e '@.token')
 ! $manager status | grep -F "$private_key"
 ! ubus call luci.warp status | grep -F "$token"
 ! logread | grep -F "$private_key"
@@ -125,7 +130,8 @@ ubus call luci.warp status '{"command":"touch /tmp/warp-rpc-injection"}' >/dev/n
 [ ! -e /tmp/warp-rpc-injection ]
 
 $manager unregister >/dev/null
-[ ! -e /etc/warp/usque.json ]
+[ ! -e /etc/warp/awg-account.json ]
+[ ! -e /etc/warp/awg.conf ]
 [ ! -e /etc/warp/backend.log ]
 uci -q show network.warp >"$work/conflict.unregistered"
 diff -u "$work/conflict.before" "$work/conflict.unregistered"

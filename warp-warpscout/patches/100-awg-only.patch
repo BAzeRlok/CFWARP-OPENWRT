@@ -1,0 +1,608 @@
+diff --git a/cli.go b/cli.go
+index 9661593..6db7664 100644
+--- a/cli.go
++++ b/cli.go
+@@ -30,14 +30,8 @@ var commands = []command{
+ 			"Working endpoints are reported grouped per subnet. ENDPOINT PING is the ICMP",
+ 			"ping to the endpoint address; -tun-ping adds TUN PING, measured inside the tunnel.",
+ 			"Needs a WARP account: run \"warpscout register\" first.",
+-			"",
+-			"-proto masque scans Cloudflare's MASQUE service instead: it has no endpoint",
+-			"pools, so the run covers two anycast addresses on a fixed set of ports and",
+-			"skips phase 1 - a MASQUE dial succeeds on ports that then pass no data, so",
+-			"only the full tunnel check tells them apart. Those endpoints flap, hence",
+-			"-masque-attempts, and the SNI is what gets them past DPI, hence -masque-sni.",
+ 		},
+-		groups: []flagGroup{scanGroup, protoGroup, awgGroup, masqueGroup, nestGroup, outputGroup},
++		groups: []flagGroup{scanGroup, protoGroup, awgGroup, nestGroup, outputGroup},
+ 		setup:  setupScanFlags,
+ 		run:    runScanCmd,
+ 	},
+@@ -53,9 +47,6 @@ var commands = []command{
+ 			"Falls back to registering through a WARP tunnel when the Cloudflare API",
+ 			"is unreachable directly, trying AmneziaWG then WireGuard; -proxy skips",
+ 			"that fallback, so the AmneziaWG parameters below only shape it.",
+-			"",
+-			"A MASQUE device is registered alongside, because \"-proto masque\" needs its",
+-			"own one. Failing to get it only prints a warning - the rest still works.",
+ 		},
+ 		groups: []flagGroup{registerGroup, awgGroup, plainGroup},
+ 		setup:  setupRegisterFlags,
+@@ -75,21 +66,6 @@ var commands = []command{
+ 		setup:  setupFindJunkFlags,
+ 		run:    runFindJunkCmd,
+ 	},
+-	{
+-		name:  "find-sni",
+-		brief: "search a MASQUE SNI that gets through this network",
+-		intro: []string{
+-			"Rescans the MASQUE endpoints with a different SNI each round until one",
+-			"brings up the -threshold share of them, then prints the scan command to",
+-			"reuse it. The candidates are a fixed list, so the search ends by itself;",
+-			"Ctrl+C keeps the best SNI so far.",
+-			"",
+-			"Verifies by handshake and in-tunnel ping only - no exit colo is resolved.",
+-		},
+-		groups: []flagGroup{findSNIGroup, plainGroup},
+-		setup:  setupFindSNIFlags,
+-		run:    runFindSNICmd,
+-	},
+ 	{
+ 		name:  "socks",
+ 		brief: "serve one endpoint as a local SOCKS5 proxy (for testing it)",
+@@ -105,7 +81,7 @@ var commands = []command{
+ 			"-through works here too, and it is the only way to try a nested tunnel",
+ 			"without building the interface chain by hand.",
+ 		},
+-		groups: []flagGroup{socksGroup, protoGroup, awgGroup, masqueGroup, nestGroup},
++		groups: []flagGroup{socksGroup, protoGroup, awgGroup, nestGroup},
+ 		setup:  setupSocksFlags,
+ 		run:    runSocksCmd,
+ 	},
+diff --git a/findsni.go b/findsni.go
+index 00b0607..769b4d2 100644
+--- a/findsni.go
++++ b/findsni.go
+@@ -1,3 +1,5 @@
++//go:build warpscout_full
++
+ package main
+ 
+ import (
+diff --git a/flags.go b/flags.go
+index 2c8a4e2..3a98d55 100644
+--- a/flags.go
++++ b/flags.go
+@@ -104,13 +104,8 @@ var (
+ 		{"", "inner-proto", "wg|awg", "protocol of the tunnels being scanned, which run inside the -through one where DPI cannot see them; -proto stays the outer tunnel, the one that crosses your network"},
+ 	}}
+ 
+-	masqueGroup = flagGroup{"MASQUE", []flagSpec{
+-		{"", "masque-sni", "HOST", "SNI to present to the MASQUE endpoint; a different name often gets through DPI"},
+-		{"", "masque-attempts", "N", "how many times to re-check a failing MASQUE endpoint before calling it dead"},
+-	}}
+-
+ 	protoGroup = flagGroup{"Protocol", []flagSpec{
+-		{"p", "proto", "wg|awg|masque|masque-h2", "tunnel protocol: wg (WireGuard), awg (AmneziaWG), masque (CONNECT-IP over QUIC) or masque-h2 (CONNECT-IP over TCP)"},
++		{"p", "proto", "wg|awg", "tunnel protocol: wg (WireGuard) or awg (AmneziaWG)"},
+ 	}}
+ 
+ 	awgGroup = flagGroup{"AmneziaWG obfuscation parameters", []flagSpec{
+@@ -127,7 +122,7 @@ var (
+ 		{"o", "output", "FILE", "full per-endpoint report file (default warpscout-report-<timestamp>.txt)"},
+ 		{"", "no-report", "", "skip the report file entirely (overrides -o)"},
+ 		{"", "conf", "FILE", "write a ready-to-import config for the best endpoint (\"-\" prints it instead)"},
+-		{"", "conf-type", "KIND", "format of -conf: native (wg/awg .conf, usque config.json), mihomo or mihomo-json"},
++		{"", "conf-type", "KIND", "format of -conf: native (wg/awg .conf), mihomo or mihomo-json"},
+ 		{"", "table-off", "", "add \"Table = off\" to the generated config: bring the interface up without touching routes"},
+ 		{"", "mtu", "N", "set MTU in the generated config (default: leave the line out)"},
+ 		{"", "dns", "LIST", "DNS servers in the generated config: comma-separated (default: Cloudflare, following -6)"},
+@@ -154,13 +149,6 @@ var (
+ 		{"", "threshold", "PCT", "accept a junk set once this share of sampled endpoints works"},
+ 	}, netSpecs...)}
+ 
+-	findSNIGroup = flagGroup{"Search tuning", append([]flagSpec{
+-		{"p", "proto", "masque|masque-h2", "which MASQUE transport to search an SNI for: QUIC or TCP"},
+-		{"jt", "tunnel-jobs", "N", "tunnel workers per round"},
+-		{"", "threshold", "PCT", "accept an SNI once this share of the endpoints works"},
+-		{"", "masque-attempts", "N", "how many times to re-check a failing MASQUE endpoint before calling it dead"},
+-	}, netSpecs...)}
+-
+ 	socksGroup = flagGroup{"SOCKS proxy", []flagSpec{
+ 		{"e", "endpoint", "ADDR", "WARP endpoint to tunnel through (IP or ip:port, as \"scan -best\" prints)"},
+ 		{"P", "port", "N", "port the SOCKS5 server listens on"},
+@@ -268,8 +256,6 @@ func setupScanFlags(fs *flag.FlagSet, o *options) {
+ 	fs.StringVar(&o.bestBy, "best-by", bestKeyPing, "")
+ 	fs.StringVar(&o.conf, "conf", "", "")
+ 	fs.StringVar(&o.confType, "conf-type", confTypeNative, "")
+-	fs.StringVar(&masqueSNI, "masque-sni", masqueDefaultSNI, "")
+-	fs.IntVar(&masqueAttempts, "masque-attempts", masqueDefaultAttempts, "")
+ 	fs.StringVar(&o.through, "through", "", "")
+ 	fs.StringVar(&o.innerProto, "inner-proto", protoWG, "")
+ 	fs.BoolVar(&o.tableOff, "table-off", false, "")
+@@ -305,17 +291,6 @@ func setupFindJunkFlags(fs *flag.FlagSet, o *options) {
+ 	o.tunPingCheck = true
+ }
+ 
+-func setupFindSNIFlags(fs *flag.FlagSet, o *options) {
+-	addNetFlags(fs, o)
+-	intFlag(fs, &o.tunnelParallel, masqueRoundTargets, "jt", "tunnel-jobs")
+-	fs.IntVar(&o.threshold, "threshold", defaultSNIThreshold, "")
+-	fs.IntVar(&masqueAttempts, "masque-attempts", masqueDefaultAttempts, "")
+-	fs.BoolVar(&o.plain, "plain", false, "")
+-	strFlag(fs, &o.proto, protoMASQUE, "p", "proto")
+-	o.perSubnet = findSNISample
+-	o.tunPingCheck = true
+-}
+-
+ func setupSocksFlags(fs *flag.FlagSet, o *options) {
+ 	intFlag(fs, &o.timeoutSec, 2, "t", "timeout")
+ 	strFlag(fs, &o.iface, "", "I", "interface")
+@@ -325,8 +300,6 @@ func setupSocksFlags(fs *flag.FlagSet, o *options) {
+ 	intFlag(fs, &o.port, defaultSocksPort, "P", "port")
+ 	strFlag(fs, &o.proto, protoWG, "p", "proto")
+ 	addAWGFlags(fs, o)
+-	fs.StringVar(&masqueSNI, "masque-sni", masqueDefaultSNI, "")
+-	fs.IntVar(&masqueAttempts, "masque-attempts", masqueDefaultAttempts, "")
+ 	fs.StringVar(&o.through, "through", "", "")
+ 	fs.StringVar(&o.innerProto, "inner-proto", protoWG, "")
+ 	o.perSubnet = 1
+@@ -389,14 +362,11 @@ func applyCommonFlags(fs *flag.FlagSet, o *options) {
+ 	applyDNS(o)
+ 	applyTarget(o)
+ 	applyNode(o)
+-	rejectMasqueFilters(*o)
+-	validateMasqueAttempts()
+ 	validateThrough(fs, *o)
+ 	applyNestedJobs(fs, o)
+ }
+ 
+-// Both tunnels are WireGuard: only the wg pools hand out a choice of node, which
+-// is the whole point of nesting, and MASQUE gives one node per network.
++// Both tunnels are WireGuard-family transports.
+ func validateThrough(fs *flag.FlagSet, o options) {
+ 	if o.through == "" {
+ 		if explicitFlags(fs)["inner-proto"] {
+@@ -430,16 +400,6 @@ func applyNestedJobs(fs *flag.FlagSet, o *options) {
+ 	o.tunnelParallel = nestedTunnelJobs
+ }
+ 
+-// find-sni is a MASQUE-only command, but it has two transports to search now,
+-// so -proto is registered and then bounded here rather than pinned.
+-func validateSNIProto(o options) {
+-	if o.proto == protoMASQUE || o.proto == protoMASQUEH2 {
+-		return
+-	}
+-	fmt.Fprintf(os.Stderr, "find-sni searches a MASQUE SNI: -proto must be %s or %s, not %q\n", protoMASQUE, protoMASQUEH2, o.proto)
+-	os.Exit(2)
+-}
+-
+ func applyTarget(o *options) {
+ 	if o.target == "" {
+ 		return
+@@ -570,8 +530,7 @@ func validateBestBy(o *options) {
+ 	bestBy = o.bestBy
+ }
+ 
+-// -port pins a single port, and MASQUE already reports one result per port, so
+-// neither combination has anything left to sweep.
++// -port pins a single port, so it cannot be combined with a port sweep.
+ func validateSweepPorts(o options) {
+ 	if o.sweepPorts == "" {
+ 		return
+@@ -584,10 +543,6 @@ func validateSweepPorts(o options) {
+ 		fmt.Fprintln(os.Stderr, "-sweep-ports and -port contradict each other: -port pins a single port")
+ 		os.Exit(2)
+ 	}
+-	if o.proto == protoMASQUE || o.proto == protoMASQUEH2 {
+-		fmt.Fprintf(os.Stderr, "-sweep-ports does not apply to -proto %s: every MASQUE port is already its own result\n", o.proto)
+-		os.Exit(2)
+-	}
+ 	sweepingPorts = true
+ }
+ 
+@@ -745,30 +700,3 @@ func defaultNote(st conStyles, fs *flag.FlagSet, long string) string {
+ 	}
+ 	return st.dim.Render(fmt.Sprintf(" (default %s)", f.DefValue))
+ }
+-
+-func rejectMasqueFilters(o options) {
+-	if o.proto != protoMASQUE && o.proto != protoMASQUEH2 {
+-		return
+-	}
+-	for _, f := range []struct {
+-		name string
+-		set  bool
+-	}{
+-		{"-node", len(o.colos) > 0},
+-		{"-country", len(o.countries) > 0},
+-		{"-exclude-node", len(o.dropColos) > 0},
+-		{"-exclude-country", len(o.dropCountries) > 0},
+-	} {
+-		if f.set {
+-			fmt.Fprintf(os.Stderr, "%s does not apply to -proto %s: every MASQUE endpoint exits through the same node\n", f.name, o.proto)
+-			os.Exit(2)
+-		}
+-	}
+-}
+-
+-func validateMasqueAttempts() {
+-	if masqueAttempts < 1 {
+-		fmt.Fprintln(os.Stderr, "-masque-attempts must be at least 1")
+-		os.Exit(2)
+-	}
+-}
+diff --git a/main.go b/main.go
+index 2cf193c..4a6c728 100644
+--- a/main.go
++++ b/main.go
+@@ -4,7 +4,6 @@ import (
+ 	"context"
+ 	"fmt"
+ 	"io"
+-	"net"
+ 	"net/netip"
+ 	"os"
+ 	"runtime/debug"
+@@ -128,24 +127,6 @@ func runFindJunkCmd(ctx context.Context, opts options) error {
+ 	return runFindJunk(ctx, opts, run, time.Duration(opts.timeoutSec)*time.Second)
+ }
+ 
+-func runFindSNICmd(ctx context.Context, opts options) error {
+-	validateSNIProto(opts)
+-	if err := validateThreshold(opts.threshold); err != nil {
+-		return err
+-	}
+-	if err := loadScanAccount(opts.accountPath); err != nil {
+-		return err
+-	}
+-	run, ips, err := setupScan(opts)
+-	if err != nil {
+-		return err
+-	}
+-	if masqueAcct == nil {
+-		return fmt.Errorf("%s holds no MASQUE device: run \"warpscout register\" again", opts.accountPath)
+-	}
+-	return runFindSNI(ctx, opts, run, ips, time.Duration(opts.timeoutSec)*time.Second)
+-}
+-
+ func runScanCmd(ctx context.Context, opts options) error {
+ 	if err := loadScanAccount(opts.accountPath); err != nil {
+ 		return err
+@@ -154,10 +135,6 @@ func runScanCmd(ctx context.Context, opts options) error {
+ 	if err != nil {
+ 		return err
+ 	}
+-	if run.isMASQUE() && masqueAcct == nil {
+-		return fmt.Errorf("%s holds no MASQUE device: run \"warpscout register\" again", opts.accountPath)
+-	}
+-
+ 	ctx, cancel := context.WithCancel(ctx)
+ 	defer cancel()
+ 
+@@ -364,9 +341,6 @@ func noEndpointMsg(opts options) string {
+ 	if len(filters) > 0 {
+ 		return "every endpoint was excluded by " + strings.Join(filters, " and ")
+ 	}
+-	if opts.proto == protoMASQUE || opts.proto == protoMASQUEH2 {
+-		return masqueBlockedMsg
+-	}
+ 	if opts.genI1 == "" {
+ 		if opts.proto == protoAWG {
+ 			return "no working endpoints found - try -gen-i1 quic"
+@@ -377,8 +351,7 @@ func noEndpointMsg(opts options) string {
+ }
+ 
+ const (
+-	noWorkingMsg     = "every matching endpoint was torn down mid-stream"
+-	masqueBlockedMsg = "no MASQUE endpoint passed data - this network blocks it, try -p awg"
++	noWorkingMsg = "every matching endpoint was torn down mid-stream"
+ )
+ 
+ func writeConfFile(opts options, ph phaseResult) error {
+@@ -405,16 +378,6 @@ func writeConfFile(opts options, ph phaseResult) error {
+ 		}
+ 		fmt.Fprintln(os.Stderr, errPal.dim(note))
+ 	}
+-	if ph.run.isMASQUE() && !isMihomo(opts.confType) {
+-		if _, port, err := net.SplitHostPort(best.endpoint); err == nil {
+-			h2 := ""
+-			if ph.run.isH2() {
+-				h2 = " --http2"
+-			}
+-			fmt.Fprintln(os.Stderr, errPal.dim(fmt.Sprintf(
+-				"  run it with: usque socks -c %s -P %s -s %s%s", opts.conf, port, masqueSNI, h2)))
+-		}
+-	}
+ 	return nil
+ }
+ 
+@@ -502,7 +465,7 @@ func runScan(ctx context.Context, opts options, run protoRun, ips []netip.Addr,
+ 	if outer != nil {
+ 		emit(stepMsg{done: true, label: "Through", summary: outer.label})
+ 	}
+-	ports := masqueEndpointPorts
++	ports := warpPorts
+ 	if opts.port != 0 {
+ 		ports = []int{opts.port}
+ 		warpPorts = ports
+@@ -512,7 +475,7 @@ func runScan(ctx context.Context, opts options, run protoRun, ips []netip.Addr,
+ 		warpPorts = allWarpPorts()
+ 		emit(stepMsg{done: true, label: "Ports", summary: fmt.Sprintf("sweeping all %d known ports (phase 1 skipped)", len(warpPorts))})
+ 	}
+-	if !run.isMASQUE() && opts.port == 0 && opts.sweepPorts != sweepAll {
++	if opts.port == 0 && opts.sweepPorts != sweepAll {
+ 		open, err := reachablePorts(ctx, run, ips, timeout, portProbeSample, opts.tunnelParallel, emit)
+ 		if err != nil {
+ 			emit(stepMsg{fail: true, summary: fmt.Sprintf("phase 1 failed: %v", err)})
+@@ -525,9 +488,7 @@ func runScan(ctx context.Context, opts options, run protoRun, ips []netip.Addr,
+ 		warpPorts = open
+ 	}
+ 
+-	if !run.isMASQUE() {
+-		ports = warpPorts
+-	}
++	ports = warpPorts
+ 	targets := probeTargets(run, opts.sweepPorts != "", ips, ports)
+ 	results := make([]endpointResult, len(targets))
+ 	pings := opts.tunPingCount
+diff --git a/masque.go b/masque.go
+index c9ba3a2..27ffdf8 100644
+--- a/masque.go
++++ b/masque.go
+@@ -1,3 +1,5 @@
++//go:build warpscout_full
++
+ package main
+ 
+ import (
+diff --git a/nest.go b/nest.go
+index c9f6fa3..ec9bb2b 100644
+--- a/nest.go
++++ b/nest.go
+@@ -36,7 +36,7 @@ type nest struct {
+ // Too high and the handshake still completes while data silently dies.
+ const nestedOverhead = 60
+ 
+-// Set by applyAccount, like masqueAcct.
++// Set by applyAccount for nested-tunnel mode.
+ var outerAcct *account
+ 
+ // -through takes what -best prints, so a bare address is the exception; 2408 is
+diff --git a/pools.go b/pools.go
+index 5aa5b47..d3b82e7 100644
+--- a/pools.go
++++ b/pools.go
+@@ -32,18 +32,6 @@ var poolsV6 = []netip.Prefix{
+ var pools = poolsV4
+ 
+ func poolsFor(run protoRun, ipv6 bool) []netip.Prefix {
+-	if run.isMASQUE() {
+-		if ipv6 {
+-			if run.isH2() {
+-				return masqueH2PoolsV6
+-			}
+-			return masquePoolsV6
+-		}
+-		if run.isH2() {
+-			return masqueH2PoolsV4
+-		}
+-		return masquePoolsV4
+-	}
+ 	if ipv6 {
+ 		return poolsV6
+ 	}
+diff --git a/register.go b/register.go
+index b45bb1d..7bc54ec 100644
+--- a/register.go
++++ b/register.go
+@@ -38,23 +38,13 @@ const (
+ )
+ 
+ type account struct {
+-	ID            string         `json:"id"`
+-	Token         string         `json:"token"`
+-	PrivateKey    string         `json:"private_key"`
+-	PeerPublicKey string         `json:"peer_public_key"`
+-	IPv4          string         `json:"ipv4,omitempty"`
+-	IPv6          string         `json:"ipv6,omitempty"`
+-	Masque        *masqueAccount `json:"masque,omitempty"`
+-	Outer         *account       `json:"outer,omitempty"`
+-}
+-
+-type masqueAccount struct {
+-	ID            string `json:"id"`
+-	Token         string `json:"token"`
+-	PrivateKey    string `json:"private_key"`
+-	PeerPublicKey string `json:"peer_public_key"`
+-	IPv4          string `json:"ipv4"`
+-	IPv6          string `json:"ipv6"`
++	ID            string   `json:"id"`
++	Token         string   `json:"token"`
++	PrivateKey    string   `json:"private_key"`
++	PeerPublicKey string   `json:"peer_public_key"`
++	IPv4          string   `json:"ipv4,omitempty"`
++	IPv6          string   `json:"ipv6,omitempty"`
++	Outer         *account `json:"outer,omitempty"`
+ }
+ 
+ func generateKeypair() (privB64, pubB64 string, err error) {
+@@ -120,7 +110,6 @@ func applyAccount(a account) {
+ 	if a.IPv6 != "" {
+ 		warpAddressV6 = a.IPv6
+ 	}
+-	masqueAcct = a.Masque
+ 	outerAcct = a.Outer
+ }
+ 
+@@ -207,13 +196,7 @@ func rotatedAccount(body []byte, priv string, existing account) (account, error)
+ }
+ 
+ func mintAccount(ctx context.Context, client *http.Client, existing account) (account, error) {
+-	a, err := mintWGAccount(ctx, client, existing)
+-	if err != nil {
+-		return account{}, err
+-	}
+-	a.Masque = mintMasque(ctx, client, existing.Masque)
+-	a.Outer = mintOuter(ctx, client, existing.Outer)
+-	return a, nil
++	return mintWGAccount(ctx, client, existing)
+ }
+ 
+ func mintOuter(ctx context.Context, client *http.Client, existing *account) *account {
+@@ -229,15 +212,6 @@ func mintOuter(ctx context.Context, client *http.Client, existing *account) *acc
+ 	return existing
+ }
+ 
+-func mintMasque(ctx context.Context, client *http.Client, existing *masqueAccount) *masqueAccount {
+-	m, err := registerMasque(ctx, client)
+-	if err == nil {
+-		return m
+-	}
+-	fmt.Fprintln(os.Stderr, errPal.fail(fmt.Sprintf("MASQUE device registration failed (%v) - \"-p masque\" will not work", err)))
+-	return existing
+-}
+-
+ func mintWGAccount(ctx context.Context, client *http.Client, existing account) (account, error) {
+ 	if existing.ID == "" || existing.Token == "" {
+ 		return registerWARP(ctx, client)
+diff --git a/socks.go b/socks.go
+index ae2187c..5a89f1c 100644
+--- a/socks.go
++++ b/socks.go
+@@ -48,10 +48,6 @@ func runSocksCmd(ctx context.Context, opts options) error {
+ 	if err != nil {
+ 		return err
+ 	}
+-	if run.isMASQUE() && masqueAcct == nil {
+-		return fmt.Errorf("%s holds no MASQUE device: run \"warpscout register\" again", opts.accountPath)
+-	}
+-
+ 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt)
+ 	defer stop()
+ 
+diff --git a/tunnel.go b/tunnel.go
+index c363e53..cc1afac 100644
+--- a/tunnel.go
++++ b/tunnel.go
+@@ -48,9 +48,6 @@ type tunnel interface {
+ }
+ 
+ func newTunnel(run protoRun) (tunnel, error) {
+-	if run.isMASQUE() {
+-		return newMasqueTunnel(run.isH2())
+-	}
+ 	return newWGTunnel(run.isAWG())
+ }
+ 
+@@ -119,7 +116,7 @@ type probeTarget struct {
+ }
+ 
+ func probeTargets(run protoRun, perPort bool, ips []netip.Addr, ports []int) []probeTarget {
+-	if !run.isMASQUE() && !perPort {
++	if !perPort {
+ 		targets := make([]probeTarget, len(ips))
+ 		for i, ip := range ips {
+ 			targets[i] = probeTarget{ip: ip}
+diff --git a/warp.go b/warp.go
+index 9d770c2..c71944c 100644
+--- a/warp.go
++++ b/warp.go
+@@ -151,8 +151,6 @@ type protoKind int
+ const (
+ 	kindWG protoKind = iota
+ 	kindAWG
+-	kindMASQUE
+-	kindMASQUEH2
+ )
+ 
+ type protoRun struct {
+@@ -161,25 +159,15 @@ type protoRun struct {
+ }
+ 
+ const (
+-	protoWG       = "wg"
+-	protoAWG      = "awg"
+-	protoMASQUE   = "masque"
+-	protoMASQUEH2 = "masque-h2"
++	protoWG  = "wg"
++	protoAWG = "awg"
+ )
+ 
+ func (r protoRun) isAWG() bool { return r.kind == kindAWG }
+ 
+-// Both MASQUE kinds run the same CONNECT-IP tunnel and differ only in the
+-// transport underneath it, so everything that branches on "is this MASQUE"
+-// stays one branch and only the transport asks isH2.
+-func (r protoRun) isMASQUE() bool { return r.kind == kindMASQUE || r.kind == kindMASQUEH2 }
+-func (r protoRun) isH2() bool     { return r.kind == kindMASQUEH2 }
+-
+ var protoRuns = []protoRun{
+ 	{kindWG, protoWG},
+ 	{kindAWG, protoAWG},
+-	{kindMASQUE, protoMASQUE},
+-	{kindMASQUEH2, protoMASQUEH2},
+ }
+ 
+ func parseProto(p string) (protoRun, error) {
+@@ -188,5 +176,5 @@ func parseProto(p string) (protoRun, error) {
+ 			return r, nil
+ 		}
+ 	}
+-	return protoRun{}, fmt.Errorf("invalid -proto %q: use wg, awg, masque or masque-h2", p)
++	return protoRun{}, fmt.Errorf("invalid -proto %q: use wg or awg", p)
+ }
+diff --git a/wgconf.go b/wgconf.go
+index d904608..7da140a 100644
+--- a/wgconf.go
++++ b/wgconf.go
+@@ -145,9 +145,6 @@ func renderConfFor(o options, endpoint string, run protoRun) ([]byte, error) {
+ 	if isMihomo(o.confType) {
+ 		return renderMihomoConf(o, endpoint, run)
+ 	}
+-	if run.isMASQUE() {
+-		return renderMasqueConf(endpoint, run.isH2())
+-	}
+ 	return []byte(renderConf(o, endpoint, run)), nil
+ }
+ 
+@@ -219,10 +216,6 @@ func mihomoName(run protoRun) string {
+ 	switch run.kind {
+ 	case kindAWG:
+ 		return "AWG WARP"
+-	case kindMASQUE:
+-		return "MASQUE H3 WARP"
+-	case kindMASQUEH2:
+-		return "MASQUE H2 WARP"
+ 	}
+ 	return "WG WARP"
+ }
+@@ -426,28 +419,6 @@ func mihomoProxy(o options, name, endpoint string, run protoRun, mtu int, dns []
+ }
+ 
+ func mihomoPeer(run protoRun, ipv6 bool, host string, port int) ([]kv, error) {
+-	if run.isMASQUE() {
+-		if masqueAcct == nil {
+-			return nil, fmt.Errorf("no MASQUE device in the account file")
+-		}
+-		pub, err := pemBody(masqueAcct.PeerPublicKey)
+-		if err != nil {
+-			return nil, err
+-		}
+-		p := []kv{{"type", "masque"}, {"server", host}, {"port", port}}
+-		// mihomo's default is HTTP/3; the TCP transport is the same type with a
+-		// network selector rather than a type of its own.
+-		if run.isH2() {
+-			p = append(p, kv{"network", "h2"})
+-		}
+-		return append(p,
+-			kv{"sni", masqueSNI},
+-			kv{"private-key", masqueAcct.PrivateKey},
+-			kv{"public-key", pub},
+-			mihomoAddr(masqueAcct.IPv4, masqueAcct.IPv6, ipv6),
+-		), nil
+-	}
+-
+ 	// The single-peer fields mihomo still accepts at the top level are its legacy
+ 	// syntax; a peers list is the current one.
+ 	peer := []kv{

@@ -9,8 +9,7 @@ DISABLED_FILE="$STATE_DIR/disabled"
 FORCE_START_FILE="/tmp/warp-force-start"
 
 start_service() {
-	local auto_start backend interface_name mtu keepalive ipv4 ipv6 sni
-	local prog config_file
+	local auto_start backend interface_name
 
 	[ ! -e "$DISABLED_FILE" ] || return 0
 
@@ -19,30 +18,14 @@ start_service() {
 	[ "$auto_start" -eq 1 ] || [ -e "$FORCE_START_FILE" ] || return 0
 	config_get backend main actual_backend ''
 	config_get interface_name main actual_interface warp
-	config_get mtu main mtu 1280
-	config_get keepalive main keepalive 5
-	config_get_bool ipv4 main ipv4 1
-	config_get_bool ipv6 main ipv6 1
-	config_get sni main masque_sni ozon.ru
-	[ -n "$sni" ] || sni=ozon.ru
-	[ "$backend" = usque_masque ] || return 0
-
-	mkdir -p "$STATE_DIR"
-	chmod 700 "$STATE_DIR"
-
-	prog=/usr/libexec/warp-usque
-	config_file="$STATE_DIR/usque.json"
-	[ -x "$prog" ] || return 1
-	[ -s "$config_file" ] || return 0
+	[ "$backend" = amneziawg ] || return 0
+	[ -x /usr/libexec/warp-awg-runner ] || return 1
+	[ -s "$STATE_DIR/awg-account.json" ] || return 0
+	[ -s "$STATE_DIR/awg.conf" ] || return 0
 
 	procd_open_instance warp
-	procd_set_param command "$prog" --config "$config_file" nativetun \
-		--interface-name "$interface_name" --mtu "$mtu" \
-		--keepalive-period "${keepalive}s" --reconnect-delay 250ms \
-		--always-reconnect --sni-address "$sni"
-	[ "$ipv4" -eq 1 ] || procd_append_param command --no-tunnel-ipv4
-	[ "$ipv6" -eq 1 ] || procd_append_param command --no-tunnel-ipv6
-	procd_set_param file "$config_file"
+	procd_set_param command /usr/libexec/warp-awg-runner "$interface_name"
+	procd_set_param file "$STATE_DIR/awg-account.json" "$STATE_DIR/awg.conf"
 	procd_set_param stdout 1
 	procd_set_param stderr 1
 	procd_set_param term_timeout 10

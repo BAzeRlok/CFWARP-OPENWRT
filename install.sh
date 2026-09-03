@@ -4,11 +4,12 @@ set -eu
 umask 077
 
 REPOSITORY="BAzeRlok/CFWARP-OPENWRT"
-RELEASE_TAG="v2.0.1"
+RELEASE_TAG="v3.0.0"
 RELEASE_URL="https://github.com/$REPOSITORY/releases/download/$RELEASE_TAG"
-LUCI_PACKAGE="luci-app-warp-2.0.1-r1.apk"
-I18N_PACKAGE="luci-i18n-warp-ru-26.245.69200.09cef59.apk"
-MASQUE_SNI="${WARP_SNI:-ozon.ru}"
+LUCI_PACKAGE="luci-app-warp-3.0.0-r1.apk"
+I18N_PACKAGE="luci-i18n-warp-ru-3.0.0.apk"
+MASKING_SNI="${WARP_SNI:-ozon.ru}"
+EXCLUDE_COUNTRIES="${WARP_EXCLUDE_COUNTRIES:-RU}"
 
 die() {
 	printf 'Ошибка: %s\n' "$*" >&2
@@ -48,10 +49,11 @@ fi
 [ -n "$ARCH" ] || ARCH=$(apk --print-arch 2>/dev/null | sed -n '1p')
 case "$ARCH" in
 	aarch64|aarch64_cortex-a53)
-		USQUE_PACKAGE="warp-usque-4.2.1-r9-$ARCH.apk"
+		AWG_PACKAGE="warp-awg-3.1.20260828-r1-$ARCH.apk"
+		SCOUT_PACKAGE="warp-warpscout-0.16.0-r1-$ARCH.apk"
 		;;
 	*)
-		die "для архитектуры $ARCH пока нет warp-usque; поддерживаются aarch64 и aarch64_cortex-a53"
+		die "для архитектуры $ARCH пока нет AWG backend; поддерживаются aarch64 и aarch64_cortex-a53"
 		;;
 esac
 
@@ -60,18 +62,20 @@ trap 'rm -rf "$INSTALL_DIR"' EXIT HUP INT TERM
 
 printf 'Скачивание CFWARP %s для %s...\n' "$RELEASE_TAG" "$ARCH"
 download "$RELEASE_URL/SHA256SUMS" "$INSTALL_DIR/SHA256SUMS"
-for package in "$USQUE_PACKAGE" "$LUCI_PACKAGE" "$I18N_PACKAGE"; do
+for package in "$AWG_PACKAGE" "$SCOUT_PACKAGE" "$LUCI_PACKAGE" "$I18N_PACKAGE"; do
 	download "$RELEASE_URL/$package" "$INSTALL_DIR/$package"
 	verify_file "$INSTALL_DIR/$package"
 done
 
 printf 'Установка проверенных пакетов...\n'
 apk add --allow-untrusted \
-	"$INSTALL_DIR/$USQUE_PACKAGE" \
+	"$INSTALL_DIR/$AWG_PACKAGE" \
+	"$INSTALL_DIR/$SCOUT_PACKAGE" \
 	"$INSTALL_DIR/$LUCI_PACKAGE" \
 	"$INSTALL_DIR/$I18N_PACKAGE"
 
-uci set warp.main.masque_sni="$MASQUE_SNI"
+uci set warp.main.sni="$MASKING_SNI"
+uci set warp.main.exclude_countries="$EXCLUDE_COUNTRIES"
 uci commit warp
 
 /etc/init.d/rpcd restart
@@ -84,7 +88,7 @@ printf '%s\n' "$result"
 case "$result" in
 	*'"ok":true'*) ;;
 	*)
-		printf '%s\n' 'Диагностика: /etc/warp/backend.log и logread -e warp-usque -e warp' >&2
+		printf '%s\n' 'Диагностика: /etc/warp/backend.log и logread -e warp-awg -e warp-watchdog -e warp' >&2
 		exit 1
 		;;
 esac

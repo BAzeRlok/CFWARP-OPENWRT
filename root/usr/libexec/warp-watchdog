@@ -1,0 +1,63 @@
+#!/bin/sh
+
+set -u
+
+STATE_DIR="${WARP_STATE_DIR:-/etc/warp}"
+DISABLED_FILE="$STATE_DIR/disabled"
+LOCK_DIR="${WARP_LOCK_DIR:-/var/lock/warp-manager.lock}"
+UCI_BIN="${WARP_UCI_BIN:-/sbin/uci}"
+AWG_CTL_BIN="${WARP_AWG_CTL_BIN:-/usr/libexec/warp-awgctl}"
+MANAGER="${WARP_MANAGER_BIN:-/usr/libexec/warp-manager}"
+PING_BIN="${WARP_PING_BIN:-/bin/ping}"
+INTERVAL="${WARP_WATCHDOG_INTERVAL:-30}"
+MAX_FAILURES="${WARP_WATCHDOG_FAILURES:-3}"
+
+failures=0
+
+log() {
+	logger -t warp-watchdog -- "$1"
+}
+
+while sleep "$INTERVAL"; do
+	[ ! -e "$DISABLED_FILE" ] || {
+		failures=0
+		continue
+	}
+	[ ! -d "$LOCK_DIR" ] || continue
+
+	iface=$($UCI_BIN -q get warp.main.actual_interface 2>/dev/null || true)
+	backend=$($UCI_BIN -q get warp.main.actual_backend 2>/dev/null || true)
+	if ! printf '%s' "$iface" | grep -Eq '^[A-Za-z_][A-Za-z0-9_]{0,14}$'; then
+		failures=0
+		continue
+	fi
+	[ "$backend" = amneziawg ] || {
+		failures=0
+		continue
+	}
+	healthy=0
+	if [ -r "/sys/class/net/$iface/tun_flags" ]; then
+		handshake=$($AWG_CTL_BIN get "$iface" last_handshake_time_sec 2>/dev/null || true)
+		now=$(date +%s 2>/dev/null || printf '0')
+		case "$handshake:$now" in
+			*[!0-9:]*) ;;
+			0:*|*:0) ;;
+			*)
+				age=$((now - handshake))
+				[ "$age" -ge 0 ] && [ "$age" -le 180 ] && healthy=1 || true
+				;;
+		esac
+	fi
+	if [ "$healthy" -eq 1 ] && "$PING_BIN" -4 -I "$iface" -c 1 -W 3 1.1.1.1 >/dev/null 2>&1; then
+		failures=0
+		continue
+	fi
+
+	failures=$((failures + 1))
+	[ "$failures" -ge "$MAX_FAILURES" ] || continue
+	log "AWG data plane failed $failures checks; selecting another endpoint"
+	result=$($MANAGER recover 2>&1 || true)
+	log "$result"
+	failures=0
+	sleep 90
+done

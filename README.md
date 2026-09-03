@@ -1,8 +1,9 @@
 # CFWARP for OpenWrt
 
-LuCI-приложение регистрирует Cloudflare WARP и создаёт отдельный интерфейс
-`warp` через MASQUE over QUIC. Пакет не меняет маршруты, DNS и firewall:
-трафик пойдёт через WARP только после настройки маршрутизации пользователем.
+LuCI-приложение регистрирует Cloudflare WARP, находит рабочий зарубежный
+endpoint и создаёт отдельный интерфейс `warp` через AmneziaWG. Пакет не меняет
+маршруты, DNS и firewall: трафик пойдёт через WARP только после выбора этого
+интерфейса в Forkop, PBR или другой системе маршрутизации.
 
 ## Установка
 
@@ -12,71 +13,84 @@ LuCI-приложение регистрирует Cloudflare WARP и созда
 wget -qO- https://raw.githubusercontent.com/BAzeRlok/CFWARP-OPENWRT/main/install.sh | sh
 ```
 
-Другой маскирующий SNI можно указать при установке:
+Имя в маскирующем первом пакете и исключаемые страны можно задать при установке:
 
 ```sh
 wget -qO- https://raw.githubusercontent.com/BAzeRlok/CFWARP-OPENWRT/main/install.sh |
-WARP_SNI=www.apple.com sh
+WARP_SNI=ozon.ru WARP_EXCLUDE_COUNTRIES=RU,BY sh
 ```
 
-Установщик скачивает релиз `v2.0.1`, проверяет SHA-256, устанавливает
-`warp-usque` 4.2.1-r9 и `luci-app-warp` 2.0.1-r1, затем регистрирует и
-запускает WARP.
+Установщик скачивает релиз `v3.0.0`, проверяет SHA-256, устанавливает автономный
+userspace-бэкенд AmneziaWG и WARPSCOUT, затем регистрирует WARP, проверяет
+endpoint реальным трафиком и запускает интерфейс.
 
 ## Использование
 
-Откройте LuCI → Сеть → Cloudflare WARP. Интерфейс можно подключить,
-переподключить, отключить или полностью удалить регистрацию.
+Откройте LuCI → Сеть → Cloudflare WARP. Кнопка «Переподключить» заново ищет
+рабочий endpoint. По умолчанию исключены выходы в России и узел DME.
 
 Основные настройки:
 
-- имя интерфейса — по умолчанию `warp`;
-- MTU — по умолчанию `1280`;
-- keepalive — по умолчанию `5` секунд;
-- IPv4 и IPv6 внутри туннеля;
-- SNI для маскировки QUIC.
+- имя интерфейса — `warp`;
+- MTU — `1280`;
+- persistent keepalive — `25` секунд;
+- маскирующее имя — используется только в первом AWG-пакете;
+- исключаемые страны — список ISO-кодов через запятую.
 
 Проверка состояния:
 
 ```sh
 /usr/libexec/warp-manager status
 ip -s link show dev warp
-logread -e warp-usque -e warp
+logread -e warp-awg -e warp-watchdog -e warp
 ```
 
-Проверка выхода через WARP без изменения основного маршрута:
+Проверка выхода без изменения основного маршрута:
 
 ```sh
-(
-    ip route add 1.1.1.1/32 dev warp || exit 1
-    trap 'ip route del 1.1.1.1/32 dev warp' EXIT INT TERM
-
-    curl -4 --connect-timeout 10 --max-time 20 \
-        https://1.1.1.1/cdn-cgi/trace |
-        grep -E '^(ip|colo|warp|gateway)='
-)
+curl -4 --interface warp --connect-timeout 10 --max-time 20 \
+    https://1.1.1.1/cdn-cgi/trace |
+    grep -E '^(ip|colo|warp|gateway)='
 ```
 
-Ожидаемое значение: `warp=on`.
+Ожидаемое значение: `warp=on`. Если три проверки подряд не проходят, watchdog
+сохраняет текущий рабочий конфиг, ищет другой endpoint и переключается только
+после успешной проверки кандидата.
+
+## Удаление
+
+Сначала удалите регистрацию Cloudflare и созданный сетевой интерфейс:
+
+```sh
+/usr/libexec/warp-manager unregister
+```
+
+Затем удалите пакеты:
+
+```sh
+apk del luci-i18n-warp-ru luci-app-warp warp-awg warp-warpscout
+```
 
 ## Безопасность и совместимость
 
-- приватный ключ хранится в `/etc/warp/usque.json` с правами `0600`;
-- endpoint проверяется по закреплённому публичному ключу Cloudflare;
-- SACK-подтверждения повторяются только при обнаруженной потере TCP-сегмента,
-  сокращая ожидание повторной передачи на нестабильном QUIC-канале;
-- backend изолирован от установленного пользователем sing-box;
-- WireGuard, Zapret, PBR и firewall пакет автоматически не настраивает;
-- туннельный транспорт только один: MASQUE over QUIC.
+- ключ и токен хранятся в `/etc/warp/awg-account.json` с правами `0600`;
+- AWG-конфиг хранится в `/etc/warp/awg.conf` с правами `0600`;
+- endpoint выбирается по реальной передаче данных внутри тестового туннеля;
+- userspace-бэкенд не зависит от версии ядра и не требует `kmod-amneziawg`;
+- Zapret, sing-box, Forkop, PBR, DNS и firewall автоматически не изменяются;
+- IPv4 и IPv6 доступны внутри одного интерфейса, транспорт endpoint — IPv4/UDP.
 
 ## Сборка
 
-Корневой каталог собирает LuCI-пакет. Подкаталог `warp-usque/` содержит
-OpenWrt-рецепт отдельного QUIC-only backend. Статические проверки:
+Корневой каталог собирает LuCI-пакет. `warp-awg/` содержит OpenWrt-рецепт
+userspace AmneziaWG и закрытого UAPI-контроллера, `warp-warpscout/` — рецепт
+регистратора и сканера endpoint. Статические проверки:
 
 ```sh
-python3 -m unittest -v tests.test_static
+./tests/run.sh
 ```
 
-Актуальные APK и `SHA256SUMS` находятся в
+APK и `SHA256SUMS` находятся в
 [последнем GitHub Release](https://github.com/BAzeRlok/CFWARP-OPENWRT/releases/latest).
+Предыдущая реализация сохранена в ветке
+[`archive/masque-v2.0.1`](https://github.com/BAzeRlok/CFWARP-OPENWRT/tree/archive/masque-v2.0.1).

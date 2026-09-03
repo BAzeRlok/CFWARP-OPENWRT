@@ -1,7 +1,7 @@
 msgid ""
 msgstr ""
-"Project-Id-Version: luci-app-warp 2.0.0\n"
-"PO-Revision-Date: 2026-09-02 00:00+0300\n"
+"Project-Id-Version: luci-app-warp 3.0.0\n"
+"PO-Revision-Date: 2026-09-03 00:00+0300\n"
 "Last-Translator: luci-app-warp contributors\n"
 "Language-Team: Russian\n"
 "Language: ru\n"
@@ -19,7 +19,7 @@ msgstr "При обращении к Cloudflare произошла сетева�
 msgid "A required package is missing."
 msgstr "Отсутствует обязательный пакет."
 
-#: htdocs/luci-static/resources/view/warp/overview.js:146
+#: htdocs/luci-static/resources/view/warp/overview.js:148
 msgid "Accept and connect"
 msgstr "Принять и подключить"
 
@@ -27,12 +27,12 @@ msgstr "Принять и подключить"
 msgid "Another WARP operation is already in progress."
 msgstr "Уже выполняется другая операция WARP."
 
-#: htdocs/luci-static/resources/view/warp/overview.js:176
+#: htdocs/luci-static/resources/view/warp/overview.js:178
 msgid "Backend"
 msgstr "Backend"
 
-#: htdocs/luci-static/resources/view/warp/overview.js:138
-#: htdocs/luci-static/resources/view/warp/overview.js:156
+#: htdocs/luci-static/resources/view/warp/overview.js:140
+#: htdocs/luci-static/resources/view/warp/overview.js:158
 msgid "Cancel"
 msgstr "Отмена"
 
@@ -40,16 +40,12 @@ msgstr "Отмена"
 msgid "Cloudflare API name resolution failed."
 msgstr "Не удалось разрешить имя API Cloudflare."
 
-#: htdocs/luci-static/resources/view/warp/overview.js:269
+#: htdocs/luci-static/resources/view/warp/overview.js:273
 #: root/usr/share/luci/menu.d/luci-app-warp.json:3
 msgid "Cloudflare WARP"
 msgstr "Cloudflare WARP"
 
-#: htdocs/luci-static/resources/view/warp/overview.js:64
-msgid "Cloudflare did not return an address for an enabled address family."
-msgstr "Cloudflare не вернул адрес для включённого семейства адресов."
-
-#: htdocs/luci-static/resources/view/warp/overview.js:132
+#: htdocs/luci-static/resources/view/warp/overview.js:134
 msgid "Cloudflare privacy policy"
 msgstr "Политика конфиденциальности Cloudflare"
 
@@ -69,17 +65,22 @@ msgstr "Cloudflare вернул неожиданный HTTP-статус."
 msgid "Cloudflare temporarily rate-limited registration requests."
 msgstr "Cloudflare временно ограничил частоту запросов регистрации."
 
-#: htdocs/luci-static/resources/view/warp/overview.js:126
+#: htdocs/luci-static/resources/view/warp/overview.js:128
 msgid "Cloudflare terms of use"
 msgstr "Условия использования Cloudflare"
 
-#: htdocs/luci-static/resources/view/warp/overview.js:81
+#: htdocs/luci-static/resources/view/warp/overview.js:83
 msgid "Cloudflare terms were not accepted."
 msgstr "Условия Cloudflare не были приняты."
 
-#: htdocs/luci-static/resources/view/warp/overview.js:119
-#: htdocs/luci-static/resources/view/warp/overview.js:196
-#: htdocs/luci-static/resources/view/warp/overview.js:203
+#: htdocs/luci-static/resources/view/warp/overview.js:266
+msgid ""
+"Comma-separated ISO country codes. The default avoids Russian WARP exits."
+msgstr "ISO-коды стран через запятую. По умолчанию исключены российские выходы WARP."
+
+#: htdocs/luci-static/resources/view/warp/overview.js:121
+#: htdocs/luci-static/resources/view/warp/overview.js:200
+#: htdocs/luci-static/resources/view/warp/overview.js:207
 msgid "Connect WARP"
 msgstr "Подключить WARP"
 
@@ -87,7 +88,7 @@ msgstr "Подключить WARP"
 msgid "Could not connect to the Cloudflare API."
 msgstr "Не удалось подключиться к API Cloudflare."
 
-#: htdocs/luci-static/resources/view/warp/overview.js:223
+#: htdocs/luci-static/resources/view/warp/overview.js:227
 msgid ""
 "Creates a separate WARP interface without changing routes, DNS or firewall."
 msgstr "Создаёт отдельный интерфейс WARP, не изменяя маршруты, DNS и firewall."
@@ -96,23 +97,23 @@ msgstr "Создаёт отдельный интерфейс WARP, не изме
 msgid "Disabled"
 msgstr "Отключено"
 
-#: htdocs/luci-static/resources/view/warp/overview.js:207
+#: htdocs/luci-static/resources/view/warp/overview.js:211
 msgid "Disabling WARP"
 msgstr "Отключение WARP"
 
-#: htdocs/luci-static/resources/view/warp/overview.js:208
+#: htdocs/luci-static/resources/view/warp/overview.js:212
 msgid "Disconnect"
 msgstr "Отключить"
 
-#: htdocs/luci-static/resources/view/warp/overview.js:63
-msgid "Enable at least one address family."
-msgstr "Включите хотя бы одно семейство адресов."
-
-#: htdocs/luci-static/resources/view/warp/overview.js:202
+#: htdocs/luci-static/resources/view/warp/overview.js:206
 msgid "Enabling WARP"
 msgstr "Включение WARP"
 
-#: htdocs/luci-static/resources/view/warp/overview.js:263
+#: htdocs/luci-static/resources/view/warp/overview.js:180
+msgid "Endpoint"
+msgstr "Endpoint"
+
+#: htdocs/luci-static/resources/view/warp/overview.js:258
 msgid "Enter a valid DNS hostname without a scheme or port."
 msgstr "Введите корректное DNS-имя без схемы и порта."
 
@@ -120,7 +121,11 @@ msgstr "Введите корректное DNS-имя без схемы и по
 msgid "Error"
 msgstr "Ошибка"
 
-#: htdocs/luci-static/resources/view/warp/overview.js:173
+#: htdocs/luci-static/resources/view/warp/overview.js:262
+msgid "Exclude exit countries"
+msgstr "Исключить страны выхода"
+
+#: htdocs/luci-static/resources/view/warp/overview.js:175
 msgid "Interface"
 msgstr "Интерфейс"
 
@@ -132,59 +137,63 @@ msgstr "Интерфейс создан"
 msgid "Interface is up"
 msgstr "Интерфейс поднят"
 
-#: htdocs/luci-static/resources/view/warp/overview.js:178
+#: htdocs/luci-static/resources/view/warp/overview.js:182
 msgid "Last error"
 msgstr "Последняя ошибка"
 
-#: htdocs/luci-static/resources/view/warp/overview.js:237
+#: htdocs/luci-static/resources/view/warp/overview.js:241
 msgid "MTU"
 msgstr "MTU"
 
-#: htdocs/luci-static/resources/view/warp/overview.js:65
+#: htdocs/luci-static/resources/view/warp/overview.js:251
+msgid "Masking hostname"
+msgstr "Маскирующее имя"
+
+#: htdocs/luci-static/resources/view/warp/overview.js:66
 msgid "No safe interface name is available."
 msgstr "Не найдено свободное безопасное имя интерфейса."
+
+#: htdocs/luci-static/resources/view/warp/overview.js:56
+msgid "No suitable WARP endpoint was found. Check /etc/warp/backend.log."
+msgstr "Подходящий endpoint WARP не найден. Проверьте /etc/warp/backend.log."
 
 #: htdocs/luci-static/resources/view/warp/overview.js:25
 msgid "Not configured"
 msgstr "Не настроено"
 
-#: htdocs/luci-static/resources/view/warp/overview.js:173
+#: htdocs/luci-static/resources/view/warp/overview.js:175
 msgid "Not created"
 msgstr "Не создан"
 
-#: htdocs/luci-static/resources/view/warp/overview.js:280
+#: htdocs/luci-static/resources/view/warp/overview.js:284
 msgid "Open interface %s"
 msgstr "Открыть интерфейс %s"
 
-#: htdocs/luci-static/resources/view/warp/overview.js:109
+#: htdocs/luci-static/resources/view/warp/overview.js:111
 msgid "Operation completed successfully."
 msgstr "Операция успешно выполнена."
 
-#: htdocs/luci-static/resources/view/warp/overview.js:242
+#: htdocs/luci-static/resources/view/warp/overview.js:246
 msgid "Persistent keepalive"
 msgstr "Persistent Keepalive"
 
-#: htdocs/luci-static/resources/view/warp/overview.js:101
+#: htdocs/luci-static/resources/view/warp/overview.js:103
 msgid "Please wait…"
 msgstr "Подождите…"
 
-#: htdocs/luci-static/resources/view/warp/overview.js:230
+#: htdocs/luci-static/resources/view/warp/overview.js:234
 msgid "Preferred interface name"
 msgstr "Предпочтительное имя интерфейса"
 
-#: htdocs/luci-static/resources/view/warp/overview.js:255
-msgid "QUIC SNI"
-msgstr "SNI для QUIC"
-
-#: htdocs/luci-static/resources/view/warp/overview.js:113
+#: htdocs/luci-static/resources/view/warp/overview.js:115
 msgid "RPC request failed: %s"
 msgstr "Ошибка RPC-запроса: %s"
 
-#: htdocs/luci-static/resources/view/warp/overview.js:212
+#: htdocs/luci-static/resources/view/warp/overview.js:216
 msgid "Reconnect"
 msgstr "Переподключить"
 
-#: htdocs/luci-static/resources/view/warp/overview.js:211
+#: htdocs/luci-static/resources/view/warp/overview.js:215
 msgid "Reconnecting WARP"
 msgstr "Переподключение WARP"
 
@@ -192,11 +201,11 @@ msgstr "Переподключение WARP"
 msgid "Registering"
 msgstr "Регистрация"
 
-#: htdocs/luci-static/resources/view/warp/overview.js:144
+#: htdocs/luci-static/resources/view/warp/overview.js:146
 msgid "Registering WARP"
 msgstr "Регистрация WARP"
 
-#: htdocs/luci-static/resources/view/warp/overview.js:120
+#: htdocs/luci-static/resources/view/warp/overview.js:122
 msgid ""
 "Registration connects this router to the third-party Cloudflare service and "
 "sends a generated public key and device metadata. No private key is sent."
@@ -205,31 +214,25 @@ msgstr ""
 "отправляет созданный публичный ключ и данные устройства. Приватный ключ не "
 "отправляется."
 
-#: htdocs/luci-static/resources/view/warp/overview.js:153
-#: htdocs/luci-static/resources/view/warp/overview.js:164
-#: htdocs/luci-static/resources/view/warp/overview.js:216
+#: htdocs/luci-static/resources/view/warp/overview.js:155
+#: htdocs/luci-static/resources/view/warp/overview.js:166
+#: htdocs/luci-static/resources/view/warp/overview.js:220
 msgid "Remove registration"
 msgstr "Удалить регистрацию"
 
-#: htdocs/luci-static/resources/view/warp/overview.js:162
+#: htdocs/luci-static/resources/view/warp/overview.js:164
 msgid "Removing registration"
 msgstr "Удаление регистрации"
 
-#: htdocs/luci-static/resources/view/warp/overview.js:223
+#: htdocs/luci-static/resources/view/warp/overview.js:227
 msgid "Settings"
 msgstr "Настройки"
 
-#: htdocs/luci-static/resources/view/warp/overview.js:54
-msgid "Standalone MASQUE registration failed. Check /etc/warp/backend.log."
-msgstr ""
-"Не удалось зарегистрировать автономный MASQUE. Проверьте /etc/warp/"
-"backend.log."
-
-#: htdocs/luci-static/resources/view/warp/overview.js:226
+#: htdocs/luci-static/resources/view/warp/overview.js:230
 msgid "Start automatically"
 msgstr "Автоматический запуск"
 
-#: htdocs/luci-static/resources/view/warp/overview.js:172
+#: htdocs/luci-static/resources/view/warp/overview.js:174
 msgid "Status"
 msgstr "Состояние"
 
@@ -238,17 +241,13 @@ msgid "System time is invalid. Wait for NTP synchronization and try again."
 msgstr ""
 "Системное время некорректно. Дождитесь синхронизации NTP и повторите попытку."
 
-#: htdocs/luci-static/resources/view/warp/overview.js:258
-msgid ""
-"TLS hostname used to mask the QUIC connection. Empty uses ozon.ru; the "
-"server is still verified by its pinned public key."
-msgstr ""
-"TLS-имя для маскировки QUIC-соединения. Пустое поле использует ozon.ru; "
-"сервер по-прежнему проверяется по закреплённому публичному ключу."
-
 #: htdocs/luci-static/resources/view/warp/overview.js:46
 msgid "TLS verification or negotiation with Cloudflare failed."
 msgstr "Ошибка проверки или согласования TLS с Cloudflare."
+
+#: htdocs/luci-static/resources/view/warp/overview.js:54
+msgid "The AmneziaWG configuration is missing or invalid."
+msgstr "Конфигурация AmneziaWG отсутствует или повреждена."
 
 #: htdocs/luci-static/resources/view/warp/overview.js:40
 msgid "The CA certificate bundle is missing."
@@ -262,59 +261,63 @@ msgstr "Истекло время ожидания ответа API Cloudflare."
 msgid "The Cloudflare registration service is temporarily unavailable."
 msgstr "Сервис регистрации Cloudflare временно недоступен."
 
-#: htdocs/luci-static/resources/view/warp/overview.js:60
-msgid "The IPv4 setting is invalid."
-msgstr "Некорректная настройка IPv4."
-
-#: htdocs/luci-static/resources/view/warp/overview.js:61
-msgid "The IPv6 setting is invalid."
-msgstr "Некорректная настройка IPv6."
-
-#: htdocs/luci-static/resources/view/warp/overview.js:62
-msgid "The MASQUE SNI hostname is invalid."
-msgstr "Указано некорректное имя SNI для MASQUE."
-
 #: htdocs/luci-static/resources/view/warp/overview.js:41
 msgid "The TUN device is unavailable. Check kmod-tun."
 msgstr "Устройство TUN недоступно. Проверьте kmod-tun."
 
-#: htdocs/luci-static/resources/view/warp/overview.js:80
+#: htdocs/luci-static/resources/view/warp/overview.js:53
+msgid "The WARP account is missing or invalid."
+msgstr "Учётная запись WARP отсутствует или повреждена."
+
+#: htdocs/luci-static/resources/view/warp/overview.js:82
 msgid "The WARP manager is unavailable."
 msgstr "Менеджер WARP недоступен."
 
-#: htdocs/luci-static/resources/view/warp/overview.js:88
+#: htdocs/luci-static/resources/view/warp/overview.js:90
 msgid "The WARP operation failed."
 msgstr "Не удалось выполнить операцию WARP."
 
-#: htdocs/luci-static/resources/view/warp/overview.js:67
+#: htdocs/luci-static/resources/view/warp/overview.js:68
 msgid "The WARP tunnel service could not be started."
 msgstr "Не удалось запустить службу туннеля WARP."
 
-#: htdocs/luci-static/resources/view/warp/overview.js:76
+#: htdocs/luci-static/resources/view/warp/overview.js:78
 msgid "The application settings could not be committed."
 msgstr "Не удалось сохранить настройки приложения."
 
-#: htdocs/luci-static/resources/view/warp/overview.js:56
+#: htdocs/luci-static/resources/view/warp/overview.js:58
 msgid "The automatic start setting is invalid."
 msgstr "Некорректное значение автоматического запуска."
 
-#: htdocs/luci-static/resources/view/warp/overview.js:58
+#: htdocs/luci-static/resources/view/warp/overview.js:60
 msgid "The configured MTU is invalid."
 msgstr "Указано некорректное значение MTU."
 
-#: htdocs/luci-static/resources/view/warp/overview.js:59
+#: htdocs/luci-static/resources/view/warp/overview.js:61
 msgid "The configured keepalive value is invalid."
 msgstr "Указано некорректное значение keepalive."
 
-#: htdocs/luci-static/resources/view/warp/overview.js:75
+#: htdocs/luci-static/resources/view/warp/overview.js:65
+msgid "The endpoint scan size is invalid."
+msgstr "Указан некорректный размер поиска endpoint."
+
+#: htdocs/luci-static/resources/view/warp/overview.js:63
+msgid "The excluded country list is invalid."
+msgstr "Список исключаемых стран некорректен."
+
+#: htdocs/luci-static/resources/view/warp/overview.js:64
+msgid "The excluded endpoint list is invalid."
+msgstr "Список исключаемых узлов некорректен."
+
+#: htdocs/luci-static/resources/view/warp/overview.js:77
 msgid "The generated network configuration is invalid."
 msgstr "Созданная конфигурация сети некорректна."
 
-#: htdocs/luci-static/resources/view/warp/overview.js:69
+#: htdocs/luci-static/resources/view/warp/overview.js:71
 msgid "The interface could not be brought up."
 msgstr "Не удалось поднять интерфейс."
 
-#: htdocs/luci-static/resources/view/warp/overview.js:154
+#: htdocs/luci-static/resources/view/warp/overview.js:156
 msgid ""
 "The managed interface and local registration secrets will be removed. Other "
 "network and firewall settings are not touched."
@@ -322,71 +325,75 @@ msgstr ""
 "Управляемый интерфейс и локальные секреты регистрации будут удалены. "
 "Остальные настройки сети и firewall не изменятся."
 
-#: htdocs/luci-static/resources/view/warp/overview.js:66
+#: htdocs/luci-static/resources/view/warp/overview.js:67
 msgid "The managed interface is missing."
 msgstr "Управляемый интерфейс отсутствует."
 
-#: htdocs/luci-static/resources/view/warp/overview.js:71
+#: htdocs/luci-static/resources/view/warp/overview.js:73
 msgid "The managed network sections could not be backed up."
 msgstr "Не удалось сохранить резервную копию управляемых сетевых секций."
 
-#: htdocs/luci-static/resources/view/warp/overview.js:73
+#: htdocs/luci-static/resources/view/warp/overview.js:62
+msgid "The masking hostname is invalid."
+msgstr "Указано некорректное маскирующее имя."
+
+#: htdocs/luci-static/resources/view/warp/overview.js:75
 msgid "The network configuration could not be committed."
 msgstr "Не удалось сохранить конфигурацию сети."
 
-#: htdocs/luci-static/resources/view/warp/overview.js:72
+#: htdocs/luci-static/resources/view/warp/overview.js:74
 msgid "The network configuration rollback failed."
 msgstr "Не удалось откатить конфигурацию сети."
 
-#: htdocs/luci-static/resources/view/warp/overview.js:79
+#: htdocs/luci-static/resources/view/warp/overview.js:81
 msgid "The operation lock could not be acquired."
 msgstr "Не удалось получить блокировку операции."
 
-#: htdocs/luci-static/resources/view/warp/overview.js:57
+#: htdocs/luci-static/resources/view/warp/overview.js:59
 msgid "The preferred interface name is invalid."
 msgstr "Некорректное предпочтительное имя интерфейса."
 
-#: htdocs/luci-static/resources/view/warp/overview.js:78
+#: htdocs/luci-static/resources/view/warp/overview.js:80
 msgid "The protected registration data could not be saved."
 msgstr "Не удалось сохранить защищённые данные регистрации."
 
-#: htdocs/luci-static/resources/view/warp/overview.js:77
+#: htdocs/luci-static/resources/view/warp/overview.js:79
 msgid "The protected registration directory could not be created."
 msgstr "Не удалось создать защищённый каталог регистрации."
 
-#: htdocs/luci-static/resources/view/warp/overview.js:82
+#: htdocs/luci-static/resources/view/warp/overview.js:84
 msgid "The requested operation is not allowed."
 msgstr "Запрошенная операция запрещена."
 
-#: htdocs/luci-static/resources/view/warp/overview.js:53
-msgid "The standalone MASQUE profile is missing or invalid."
-msgstr "Автономный профиль MASQUE отсутствует или повреждён."
+#: htdocs/luci-static/resources/view/warp/overview.js:70
+msgid "The selected endpoint did not pass traffic."
+msgstr "Выбранный endpoint не пропускает трафик."
 
-#: htdocs/luci-static/resources/view/warp/overview.js:55
+#: htdocs/luci-static/resources/view/warp/overview.js:57
 msgid "The stored backend name is invalid."
 msgstr "Сохранено некорректное имя backend."
 
-#: htdocs/luci-static/resources/view/warp/overview.js:74
+#: htdocs/luci-static/resources/view/warp/overview.js:76
 msgid "The temporary UCI transaction could not be created."
 msgstr "Не удалось создать временную транзакцию UCI."
 
-#: htdocs/luci-static/resources/view/warp/overview.js:68
+#: htdocs/luci-static/resources/view/warp/overview.js:69
 msgid "Timed out waiting for the WARP tunnel interface. Check the system log."
 msgstr ""
 "Истекло время ожидания туннельного интерфейса WARP. Проверьте системный "
 "журнал."
 
-#: htdocs/luci-static/resources/view/warp/overview.js:271
+#: htdocs/luci-static/resources/view/warp/overview.js:275
 msgid ""
 "Traffic uses WAN until you select this interface in your routing "
-"configuration."
-msgstr "Трафик использует WAN, пока этот интерфейс не выбран в настройках маршрутизации."
+"configuration. Reconnect scans for a new verified endpoint."
+msgstr "Трафик использует WAN, пока этот интерфейс не выбран в настройках маршрутизации. Переподключение ищет новый проверенный endpoint."
 
-#: htdocs/luci-static/resources/view/warp/overview.js:170
+#: htdocs/luci-static/resources/view/warp/overview.js:172
 msgid "Unknown"
 msgstr "Неизвестно"
 
-#: htdocs/luci-static/resources/view/warp/overview.js:234
+#: htdocs/luci-static/resources/view/warp/overview.js:238
 msgid ""
 "Use 1–15 letters, digits or underscores; the first character must not be a "
 "digit."
@@ -394,22 +401,26 @@ msgstr ""
 "Используйте от 1 до 15 букв, цифр или знаков подчёркивания; первый символ не "
 "должен быть цифрой."
 
-#: htdocs/luci-static/resources/view/warp/overview.js:247
-msgid "Use IPv4"
-msgstr "Использовать IPv4"
+#: htdocs/luci-static/resources/view/warp/overview.js:268
+msgid "Use comma-separated two-letter country codes, for example RU,BY."
+msgstr "Введите двухбуквенные коды стран через запятую, например RU,BY."
 
-#: htdocs/luci-static/resources/view/warp/overview.js:251
-msgid "Use IPv6 when available"
-msgstr "Использовать IPv6, если доступен"
+#: htdocs/luci-static/resources/view/warp/overview.js:255
+msgid "Used only in the fake first AWG packet; it does not change DNS."
+msgstr "Используется только в маскирующем первом пакете AWG и не меняет DNS."
 
 #: root/usr/share/rpcd/acl.d/luci-app-warp.json:3
 msgid "View and manage the standalone Cloudflare WARP interface"
 msgstr "Просмотр и управление отдельным интерфейсом Cloudflare WARP"
 
 #: htdocs/luci-static/resources/view/warp/overview.js:34
-msgid "WARP MASQUE (QUIC)"
-msgstr "WARP MASQUE (QUIC)"
+msgid "WARP AmneziaWG"
+msgstr "WARP AmneziaWG"
 
-#: htdocs/luci-static/resources/view/warp/overview.js:70
+#: htdocs/luci-static/resources/view/warp/overview.js:55
+msgid "WARP registration failed. Check /etc/warp/backend.log."
+msgstr "Не удалось зарегистрировать WARP. Проверьте /etc/warp/backend.log."
+
+#: htdocs/luci-static/resources/view/warp/overview.js:72
 msgid "netifd could not reload the network configuration."
 msgstr "netifd не смог перечитать конфигурацию сети."

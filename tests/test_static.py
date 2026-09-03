@@ -11,8 +11,11 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 MANAGER = ROOT / "root/usr/libexec/warp-manager"
 API = ROOT / "root/usr/libexec/warp-api"
+RUNNER = ROOT / "root/usr/libexec/warp-awg-runner"
+WATCHDOG = ROOT / "root/usr/libexec/warp-watchdog"
 RPC = ROOT / "root/usr/share/rpcd/ucode/warp.uc"
 FRONTEND = ROOT / "htdocs/luci-static/resources/view/warp/overview.js"
+AWG_CTL = ROOT / "warp-awg/files/warp-awgctl.go"
 
 
 def catalog_msgids(path):
@@ -38,104 +41,128 @@ class PackageTests(unittest.TestCase):
         for path in [
             MANAGER,
             API,
+            RUNNER,
+            WATCHDOG,
             ROOT / "root/etc/init.d/warp",
+            ROOT / "root/etc/init.d/warp-watchdog",
             ROOT / "install.sh",
             ROOT / "tests/router-integration.sh",
             ROOT / "tests/run.sh",
         ]:
             subprocess.run(["sh", "-n", str(path)], check=True)
 
+    def test_awg_controller_builds(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = pathlib.Path(directory) / "warp-awgctl"
+            subprocess.run(["go", "build", "-o", output, AWG_CTL], check=True)
+            result = subprocess.run([output], text=True, capture_output=True)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("setconf INTERFACE FILE", result.stderr)
+
     def test_json_files(self):
         for path in ROOT.rglob("*.json"):
-            json.loads(path.read_text(encoding="utf-8"))
+            if "logs" not in path.parts:
+                json.loads(path.read_text(encoding="utf-8"))
 
-    def test_manager_action_allowlist_is_exact(self):
+    def test_manager_action_allowlist(self):
         text = MANAGER.read_text(encoding="utf-8")
         dispatch = re.search(r'case "\$\{1:-\}" in\n(?P<body>.*?)\nesac\s*$', text, re.S)
         self.assertIsNotNone(dispatch)
         actions = re.findall(r'^\s*([a-z]+)\)\s+do_', dispatch.group("body"), re.M)
-        self.assertEqual(actions, ["register", "enable", "disable", "reconnect", "status", "unregister"])
+        self.assertEqual(
+            actions,
+            ["register", "enable", "disable", "reconnect", "status", "unregister", "recover"],
+        )
+        rpc = RPC.read_text(encoding="utf-8")
+        self.assertNotIn("recover: true", rpc)
 
-    def test_route_and_dns_safety_options(self):
-        text = MANAGER.read_text(encoding="utf-8")
+    def test_route_dns_and_firewall_safety(self):
+        manager = MANAGER.read_text(encoding="utf-8")
+        runner = RUNNER.read_text(encoding="utf-8")
         required = [
             "defaultroute='0'",
             "peerdns='0'",
             "proto='none'",
-            "warp_backend='usque_masque'",
+            "warp_backend='amneziawg'",
         ]
         for value in required:
-            self.assertIn(value, text)
-        self.assertNotRegex(text, r"\b(ip|route)\s+(route|rule)\s+(add|replace|del)")
-        self.assertNotIn("/etc/config/firewall", text)
-        self.assertNotIn("uci-firewall", text)
-        self.assertNotRegex(text, r"set (dhcp|firewall)\.")
+            self.assertIn(value, manager)
+        self.assertNotRegex(manager + runner, r"\bip\s+(route|rule)\s+(add|replace|del)")
+        self.assertNotIn("/etc/config/firewall", manager + runner)
+        self.assertNotRegex(manager, r"set (dhcp|firewall)\.")
 
-    def test_transactional_section_only_rollback(self):
+    def test_transactional_section_and_endpoint_rollback(self):
         text = MANAGER.read_text(encoding="utf-8")
-        self.assertIn("export network", text)
-        self.assertIn("-m import network", text)
-        self.assertIn("rollback_configuration", text)
-        self.assertIn("runtime_restart_service", text)
-        self.assertNotIn('show "network.$ACTUAL_INTERFACE" >>"$temp_snapshot"', text)
-
-    def test_legacy_backends_are_absent(self):
-        manager = MANAGER.read_text(encoding="utf-8")
-        init = (ROOT / "root/etc/init.d/warp").read_text(encoding="utf-8")
-        frontend = FRONTEND.read_text(encoding="utf-8")
-        for legacy in [
-            "wireguard_reserved",
-            "forkop_masque",
-            "forkop_warp",
-            "sing-box",
-            "actual_peer",
-            "masque-cache.db",
-            "registration.json",
-            "private.key",
+        for marker in [
+            "export network",
+            "-m import network",
+            "rollback_configuration",
+            "rollback_live_config",
+            "temp_old_config",
+            "prepare_tunnel_config",
         ]:
-            self.assertNotIn(legacy, manager + init + frontend)
-        self.assertIn('procd_open_instance warp', init)
+            self.assertIn(marker, text)
+        connect = re.search(r"connect_tunnel\(\) \{(?P<body>.*?)\n\}", text, re.S).group("body")
+        self.assertLess(connect.index('prepare_tunnel_config "$rescan"'), connect.index("runtime_stop"))
 
-    def test_standalone_usque_backend_is_isolated_and_patched(self):
+    def test_awg_backend_is_standalone(self):
         manager = MANAGER.read_text(encoding="utf-8")
         init = (ROOT / "root/etc/init.d/warp").read_text(encoding="utf-8")
-        frontend = FRONTEND.read_text(encoding="utf-8")
-        package = (ROOT / "warp-usque/Makefile").read_text(encoding="utf-8")
-        patch = (ROOT / "warp-usque/patches/100-antidpi-cloudflare-api.patch").read_text(encoding="utf-8")
-        quic_patch = (ROOT / "warp-usque/patches/110-quic-only-stability.patch").read_text(encoding="utf-8")
-        sack_patch = (ROOT / "warp-usque/patches/120-sack-recovery.patch").read_text(encoding="utf-8")
-        self.assertIn('USQUE_BIN="${WARP_USQUE_BIN:-/usr/libexec/warp-usque}"', manager)
-        self.assertIn("set warp.main.actual_backend='usque_masque'", manager)
-        self.assertIn('usque_profile_valid "$temp_usque_config"', manager)
-        self.assertIn('kill -TERM "$temp_usque_pid"', manager)
-        self.assertIn("/usr/libexec/warp-usque", init)
-        self.assertIn("nativetun", init)
-        self.assertNotIn("/etc/config/zapret", manager + init)
-        self.assertNotIn("/opt/zapret", manager + init)
-        self.assertIn("PKG_VERSION:=4.2.1", package)
-        self.assertIn("PKG_RELEASE:=9", package)
-        self.assertIn("PKG_HASH:=cd0e9c89353915cb74a0877ab6fc68ee158adf8724ef9aab878a4d90edcb1d72", package)
-        self.assertIn("HelloChrome_Auto", patch)
-        self.assertIn("forceHTTP1ALPN", patch)
-        self.assertIn('AlpnProtocols: []string{"http/1.1"}', patch)
-        self.assertIn("clientHelloFragmentConn", patch)
-        self.assertIn("ServerName: host", patch)
-        self.assertIn("--reconnect-delay 250ms", init)
-        self.assertIn("startDevicePacketReader", quic_patch)
-        self.assertIn("devicePacketQueueSize = 1", quic_patch)
-        self.assertIn("TestDevicePacketQueueStaysLowLatency", quic_patch)
-        self.assertIn('-\tUseHTTP2          bool', quic_patch)
-        self.assertIn('-\tnativeTunCmd.Flags().Bool("http2"', quic_patch)
-        self.assertIn("sackRecoveryCopies = 3", sack_patch)
-        self.assertIn("func tcpSACKRecoveryCopies", sack_patch)
-        self.assertIn("TestTCPSACKRecoveryCopies", sack_patch)
-        self.assertEqual(
-            sorted(path.name for path in (ROOT / "warp-usque/patches").glob("*.patch")),
-            ["100-antidpi-cloudflare-api.patch", "110-quic-only-stability.patch", "120-sack-recovery.patch"],
-        )
-        for text in [manager, init, (ROOT / "root/etc/config/warp").read_text(encoding="utf-8"), frontend]:
-            self.assertNotRegex(text, re.compile(r"http.?2|masque_transport", re.I))
-        self.assertNotIn("--insecure", init)
+        runner = RUNNER.read_text(encoding="utf-8")
+        watchdog = WATCHDOG.read_text(encoding="utf-8")
+        awg_package = (ROOT / "warp-awg/Makefile").read_text(encoding="utf-8")
+        scout_package = (ROOT / "warp-warpscout/Makefile").read_text(encoding="utf-8")
+        scout_patch = (ROOT / "warp-warpscout/patches/100-awg-only.patch").read_text(encoding="utf-8")
+
+        self.assertIn('SCOUT_BIN="${WARP_SCOUT_BIN:-/usr/libexec/warp-warpscout}"', manager)
+        self.assertIn("--proto awg", manager)
+        self.assertIn("--gen-i1 quic", manager)
+        self.assertIn("--tun-ping-count 10", manager)
+        self.assertIn("--exclude-country", manager)
+        self.assertIn("set warp.main.actual_backend='amneziawg'", manager)
+        self.assertIn("/usr/libexec/warp-awg-runner", init)
+        self.assertIn("/usr/libexec/warp-amneziawg-go", runner)
+        self.assertIn("/usr/libexec/warp-awgctl", runner)
+        self.assertIn('address replace "$ipv4/32"', runner)
+        self.assertIn("selecting another endpoint", watchdog)
+        self.assertIn("$MANAGER recover", watchdog)
+        self.assertIn('healthy=0', watchdog)
+        self.assertNotIn('failures=$((failures + 1))\n\t\tcontinue', watchdog)
+        self.assertNotIn("/etc/config/zapret", manager + init + runner)
+        self.assertNotIn("/opt/zapret", manager + init + runner)
+
+        self.assertIn("PKG_VERSION:=3.1.20260828", awg_package)
+        self.assertIn("PKG_HASH:=24c656cfb80ff6855702710eaf2e3729fa710bf6bfdbbbdfba01984ccd17de95", awg_package)
+        self.assertIn("cmd/warp-awgctl", awg_package)
+        self.assertIn("PKG_VERSION:=0.16.0", scout_package)
+        self.assertIn("PKG_HASH:=c21c777239856401f6529e4e2503d9f6ebd9071f78988fe86e35aaefc65a1c20", scout_package)
+        self.assertIn("return mintWGAccount(ctx, client, existing)", scout_patch)
+        self.assertIn("//go:build warpscout_full", scout_patch)
+        self.assertNotIn('github.com/Diniboy1123/connect-ip-go', scout_package)
+        self.assertFalse((ROOT / "warp-usque/Makefile").exists())
+
+    def test_runtime_contains_no_retired_transport(self):
+        paths = [
+            MANAGER,
+            API,
+            RUNNER,
+            WATCHDOG,
+            ROOT / "root/etc/init.d/warp",
+            ROOT / "root/etc/config/warp",
+            FRONTEND,
+            ROOT / "install.sh",
+        ]
+        text = "\n".join(path.read_text(encoding="utf-8") for path in paths)
+        self.assertNotRegex(text, re.compile(r"http.?2|masque|usque", re.I))
+
+    def test_awg_controller_does_not_expose_keys(self):
+        text = AWG_CTL.read_text(encoding="utf-8")
+        self.assertIn('"last_handshake_time_sec": true', text)
+        self.assertIn('"rx_bytes": true', text)
+        self.assertNotIn('"private_key": true', text)
+        self.assertNotIn('"public_key": true', text)
+        self.assertIn("key must be 32-byte base64", text)
+        self.assertIn("endpoint must contain a numeric IP address and port", text)
 
     def test_runtime_start_reports_the_failed_phase(self):
         manager = MANAGER.read_text(encoding="utf-8")
@@ -144,6 +171,7 @@ class PackageTests(unittest.TestCase):
             "tunnel_start_timeout",
             "network_reload_failed",
             "interface_up_failed",
+            "data_plane_unavailable",
         ]:
             self.assertIn(f"RUNTIME_START_ERROR={error_code}", manager)
         self.assertEqual(manager.count('emit_error "$RUNTIME_START_ERROR"'), 1)
@@ -165,12 +193,12 @@ class PackageTests(unittest.TestCase):
 
     def test_frontend_does_not_request_secrets(self):
         text = FRONTEND.read_text(encoding="utf-8")
-        for secret in ["private_key", "token", "registration.json", "client_id"]:
+        for secret in ["private_key", "token", "awg-account.json", "client_id"]:
             self.assertNotIn(secret, text)
 
     def test_translations_compile(self):
         with tempfile.NamedTemporaryFile() as output:
-            subprocess.run(["msgfmt", "-c", "-o", output.name, str(ROOT / "po/ru/warp.po")], check=True)
+            subprocess.run(["msgfmt", "-c", "-o", output.name, ROOT / "po/ru/warp.po"], check=True)
 
     def test_frontend_messages_are_in_both_catalogs(self):
         frontend = FRONTEND.read_text(encoding="utf-8")
@@ -180,29 +208,24 @@ class PackageTests(unittest.TestCase):
             for message in messages:
                 self.assertIn(message, catalog, f"{message!r} missing from {catalog_path}")
 
-    def test_package_is_architecture_independent(self):
+    def test_package_dependencies(self):
         makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
         self.assertIn("LUCI_PKGARCH:=all", makefile)
         self.assertIn("LUCI_NAME:=luci-app-warp", makefile)
-        self.assertIn("LUCI_EXTRA_DEPENDS:=kmod-tun (>=0), warp-usque (>=4.2.1-r9)", makefile)
-        self.assertNotIn("+kmod-tun", makefile)
-        self.assertNotIn("+warp-usque", makefile)
-        self.assertNotIn("+wireguard-tools", makefile)
-        self.assertNotIn("+sing-box", makefile)
-        self.assertNotIn("+kmod-wireguard", makefile)
-        self.assertNotIn("+luci-proto-wireguard", makefile)
-        self.assertNotIn("firewall4", makefile)
-        self.assertNotIn("pbr", makefile)
+        self.assertIn("warp-awg (>=3.1.20260828-r1)", makefile)
+        self.assertIn("warp-warpscout (>=0.16.0-r1)", makefile)
+        for unwanted in ["+wireguard-tools", "+sing-box", "+kmod-wireguard", "+luci-proto-wireguard", "firewall4", "pbr"]:
+            self.assertNotIn(unwanted, makefile)
 
-    def test_installer_selects_supported_arm64_package(self):
+    def test_installer_selects_supported_arm64_packages(self):
         installer = (ROOT / "install.sh").read_text(encoding="utf-8")
         self.assertIn("aarch64|aarch64_cortex-a53)", installer)
-        self.assertIn('USQUE_PACKAGE="warp-usque-4.2.1-r9-$ARCH.apk"', installer)
+        self.assertIn('AWG_PACKAGE="warp-awg-3.1.20260828-r1-$ARCH.apk"', installer)
+        self.assertIn('SCOUT_PACKAGE="warp-warpscout-0.16.0-r1-$ARCH.apk"', installer)
         self.assertIn("DISTRIB_ARCH", installer)
         self.assertIn("OPENWRT_ARCH", installer)
-        self.assertIn('RELEASE_TAG="v2.0.1"', installer)
-        self.assertNotIn("WARP_TRANSPORT", installer)
-        self.assertNotRegex(installer, re.compile(r"http.?2|masque_transport", re.I))
+        self.assertIn('RELEASE_TAG="v3.0.0"', installer)
+        self.assertIn('uci set warp.main.sni="$MASKING_SNI"', installer)
 
 
 if __name__ == "__main__":

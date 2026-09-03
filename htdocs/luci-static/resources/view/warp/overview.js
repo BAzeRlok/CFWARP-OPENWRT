@@ -31,7 +31,7 @@ const stateLabels = {
 };
 
 const backendLabels = {
-	usque_masque: _('WARP MASQUE (QUIC)')
+	amneziawg: _('WARP AmneziaWG')
 };
 
 const errorLabels = {
@@ -50,22 +50,24 @@ const errorLabels = {
 	api_unavailable: _('The Cloudflare registration service is temporarily unavailable.'),
 	unexpected_http_status: _('Cloudflare returned an unexpected HTTP status.'),
 	invalid_api_response: _('Cloudflare returned an incomplete or invalid response.'),
-	invalid_usque_profile: _('The standalone MASQUE profile is missing or invalid.'),
-	masque_registration_failed: _('Standalone MASQUE registration failed. Check /etc/warp/backend.log.'),
+	invalid_awg_account: _('The WARP account is missing or invalid.'),
+	invalid_awg_config: _('The AmneziaWG configuration is missing or invalid.'),
+	awg_registration_failed: _('WARP registration failed. Check /etc/warp/backend.log.'),
+	endpoint_scan_failed: _('No suitable WARP endpoint was found. Check /etc/warp/backend.log.'),
 	invalid_backend: _('The stored backend name is invalid.'),
 	invalid_auto_start: _('The automatic start setting is invalid.'),
 	invalid_interface_name: _('The preferred interface name is invalid.'),
 	invalid_mtu: _('The configured MTU is invalid.'),
 	invalid_keepalive: _('The configured keepalive value is invalid.'),
-	invalid_ipv4_setting: _('The IPv4 setting is invalid.'),
-	invalid_ipv6_setting: _('The IPv6 setting is invalid.'),
-	invalid_masque_sni: _('The MASQUE SNI hostname is invalid.'),
-	no_address_family: _('Enable at least one address family.'),
-	no_registered_address_for_enabled_family: _('Cloudflare did not return an address for an enabled address family.'),
+	invalid_sni: _('The masking hostname is invalid.'),
+	invalid_excluded_countries: _('The excluded country list is invalid.'),
+	invalid_excluded_nodes: _('The excluded endpoint list is invalid.'),
+	invalid_scan_sample: _('The endpoint scan size is invalid.'),
 	no_safe_interface_name: _('No safe interface name is available.'),
 	managed_interface_missing: _('The managed interface is missing.'),
 	backend_start_failed: _('The WARP tunnel service could not be started.'),
 	tunnel_start_timeout: _('Timed out waiting for the WARP tunnel interface. Check the system log.'),
+	data_plane_unavailable: _('The selected endpoint did not pass traffic.'),
 	interface_up_failed: _('The interface could not be brought up.'),
 	network_reload_failed: _('netifd could not reload the network configuration.'),
 	network_snapshot_failed: _('The managed network sections could not be backed up.'),
@@ -174,6 +176,8 @@ return view.extend({
 		];
 		if (status.backend)
 			rows.push(_('Backend'), backendLabels[status.backend] || status.backend);
+		if (status.endpoint)
+			rows.push(_('Endpoint'), status.endpoint);
 		if (status.error_code)
 			rows.push(_('Last error'), errorLabels[status.error_code] || status.error_code);
 
@@ -235,40 +239,40 @@ return view.extend({
 		};
 
 		option = section.option(form.Value, 'mtu', _('MTU'));
-		option.datatype = 'range(576,9000)';
+		option.datatype = 'range(576,1420)';
 		option.default = '1280';
 		option.rmempty = false;
 
 		option = section.option(form.Value, 'keepalive', _('Persistent keepalive'));
 		option.datatype = 'range(0,65535)';
-		option.default = '5';
+		option.default = '25';
 		option.rmempty = false;
 
-		option = section.option(form.Flag, 'ipv4', _('Use IPv4'));
-		option.default = option.enabled;
-		option.rmempty = false;
-
-		option = section.option(form.Flag, 'ipv6', _('Use IPv6 when available'));
-		option.default = option.enabled;
-		option.rmempty = false;
-
-		option = section.option(form.Value, 'masque_sni', _('QUIC SNI'));
+		option = section.option(form.Value, 'sni', _('Masking hostname'));
 		option.placeholder = 'ozon.ru';
-		option.optional = true;
-		option.description = _('TLS hostname used to mask the QUIC connection. Empty uses ozon.ru; the server is still verified by its pinned public key.');
+		option.default = 'ozon.ru';
+		option.rmempty = false;
+		option.description = _('Used only in the fake first AWG packet; it does not change DNS.');
 		option.validate = function(sectionId, value) {
-			if (!value)
-				return true;
 			if (value.length > 253 || !/^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)*[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/.test(value))
 				return _('Enter a valid DNS hostname without a scheme or port.');
 			return true;
+		};
+
+		option = section.option(form.Value, 'exclude_countries', _('Exclude exit countries'));
+		option.placeholder = 'RU';
+		option.default = 'RU';
+		option.optional = true;
+		option.description = _('Comma-separated ISO country codes. The default avoids Russian WARP exits.');
+		option.validate = function(sectionId, value) {
+			return !value || /^[A-Za-z]{2}(,[A-Za-z]{2})*$/.test(value) ? true : _('Use comma-separated two-letter country codes, for example RU,BY.');
 		};
 
 		return map.render().then(L.bind(function(formNode) {
 			const content = [
 				E('h2', {}, _('Cloudflare WARP')),
 				E('div', { 'class': 'cbi-section' }, [
-					E('p', {}, _('Traffic uses WAN until you select this interface in your routing configuration.')),
+					E('p', {}, _('Traffic uses WAN until you select this interface in your routing configuration. Reconnect scans for a new verified endpoint.')),
 					this.renderStatus(status),
 					this.renderActions(status)
 				])

@@ -1,0 +1,83 @@
+#!/bin/sh
+
+set -u
+umask 077
+
+STATE_DIR="${WARP_STATE_DIR:-/etc/warp}"
+ACCOUNT="$STATE_DIR/awg-account.json"
+CONFIG="$STATE_DIR/awg.conf"
+AWG_GO_BIN="${WARP_AWG_GO_BIN:-/usr/libexec/warp-amneziawg-go}"
+AWG_CTL_BIN="${WARP_AWG_CTL_BIN:-/usr/libexec/warp-awgctl}"
+JSONFILTER_BIN="${WARP_JSONFILTER_BIN:-/usr/bin/jsonfilter}"
+IP_BIN="${WARP_IP_BIN:-/sbin/ip}"
+
+child=
+
+cleanup() {
+	if [ -n "$child" ]; then
+		kill -TERM "$child" 2>/dev/null || true
+		wait "$child" 2>/dev/null || true
+	fi
+}
+trap cleanup EXIT HUP INT TERM
+
+fail() {
+	printf 'warp-awg: %s\n' "$1" >&2
+	exit 1
+}
+
+valid_interface() {
+	printf '%s' "$1" | grep -Eq '^[A-Za-z_][A-Za-z0-9_]{0,14}$'
+}
+
+valid_ipv4() {
+	printf '%s\n' "$1" | awk -F. '
+		NF != 4 { exit 1 }
+		{ for (i = 1; i <= 4; i++) if ($i !~ /^[0-9]+$/ || $i > 255) exit 1 }
+	'
+}
+
+valid_ipv6() {
+	printf '%s' "$1" | grep -Eq '^[0-9A-Fa-f:]+$' &&
+		printf '%s' "$1" | grep -q ':'
+}
+
+iface=${1:-}
+valid_interface "$iface" || fail 'invalid interface name'
+[ -x "$AWG_GO_BIN" ] || fail 'AmneziaWG daemon is missing'
+[ -x "$AWG_CTL_BIN" ] || fail 'AmneziaWG controller is missing'
+[ -x "$JSONFILTER_BIN" ] || fail 'jsonfilter is missing'
+[ -x "$IP_BIN" ] || fail 'ip is missing'
+[ -s "$ACCOUNT" ] || fail 'WARP account is missing'
+[ -s "$CONFIG" ] || fail 'AmneziaWG configuration is missing'
+
+ipv4=$($JSONFILTER_BIN -i "$ACCOUNT" -e '@.ipv4' 2>/dev/null || true)
+ipv6=$($JSONFILTER_BIN -i "$ACCOUNT" -e '@.ipv6' 2>/dev/null || true)
+valid_ipv4 "$ipv4" || fail 'invalid WARP IPv4 address'
+[ -z "$ipv6" ] || valid_ipv6 "$ipv6" || fail 'invalid WARP IPv6 address'
+
+"$AWG_GO_BIN" -f "$iface" &
+child=$!
+
+attempt=0
+while [ "$attempt" -lt 15 ]; do
+	[ -S "/var/run/amneziawg/$iface.sock" ] && [ -e "/sys/class/net/$iface" ] && break
+	kill -0 "$child" 2>/dev/null || fail 'AmneziaWG daemon stopped during startup'
+	sleep 1
+	attempt=$((attempt + 1))
+done
+[ -S "/var/run/amneziawg/$iface.sock" ] || fail 'AmneziaWG control socket was not created'
+
+"$AWG_CTL_BIN" setconf "$iface" "$CONFIG" || fail 'could not apply AmneziaWG configuration'
+mtu=$(sed -n 's/^[[:space:]]*# MTU: \([0-9][0-9]*\)[[:space:]]*$/\1/p' "$CONFIG" | sed -n '1p')
+case "$mtu" in ''|*[!0-9]*) mtu=1280 ;; esac
+"$IP_BIN" link set dev "$iface" mtu "$mtu" || fail 'could not set tunnel MTU'
+"$IP_BIN" address replace "$ipv4/32" dev "$iface" || fail 'could not set WARP IPv4 address'
+if [ -n "$ipv6" ] && [ -r /proc/sys/net/ipv6/conf/all/disable_ipv6 ] &&
+	[ "$(sed -n '1p' /proc/sys/net/ipv6/conf/all/disable_ipv6)" != 1 ]; then
+	"$IP_BIN" -6 address replace "$ipv6/128" dev "$iface" || fail 'could not set WARP IPv6 address'
+fi
+"$IP_BIN" link set dev "$iface" up || fail 'could not bring up the tunnel'
+
+wait "$child"
+exit $?

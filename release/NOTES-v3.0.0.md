@@ -1,0 +1,25 @@
+# CFWARP v3.0.0
+
+Автономный Cloudflare WARP-интерфейс для OpenWrt 25.12 с `apk`.
+
+- Userspace AmneziaWG: модуль ядра AmneziaWG не требуется.
+- Автоматическая регистрация WARP и поиск рабочего зарубежного endpoint.
+- Проверка endpoint реальным трафиком до переключения.
+- Watchdog повторно выбирает endpoint после трёх неудачных проверок.
+- Отдельный интерфейс без автоматического изменения маршрутов, DNS и firewall.
+- Поддерживаются `aarch64` и `aarch64_cortex-a53`.
+
+Установка:
+
+```sh
+wget -qO- https://raw.githubusercontent.com/BAzeRlok/CFWARP-OPENWRT/main/install.sh | sh
+```
+
+Удаление:
+
+```sh
+/usr/libexec/warp-manager unregister
+apk del luci-i18n-warp-ru luci-app-warp warp-awg warp-warpscout
+```
+
+После установки выберите интерфейс `warp` в Forkop, PBR или другой системе маршрутизации. Сам пакет трафик на него не направляет.

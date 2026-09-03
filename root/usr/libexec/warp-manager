@@ -4,7 +4,8 @@ set -u
 umask 077
 
 STATE_DIR="${WARP_STATE_DIR:-/etc/warp}"
-USQUE_CONFIG="$STATE_DIR/usque.json"
+ACCOUNT_FILE="$STATE_DIR/awg-account.json"
+AWG_CONFIG="$STATE_DIR/awg.conf"
 BACKEND_LOG="$STATE_DIR/backend.log"
 DISABLED_FILE="$STATE_DIR/disabled"
 LAST_ERROR="$STATE_DIR/last_error"
@@ -14,34 +15,43 @@ FORCE_START_FILE="${WARP_FORCE_START_FILE:-/tmp/warp-force-start}"
 UCI_BIN="${WARP_UCI_BIN:-/sbin/uci}"
 UBUS_BIN="${WARP_UBUS_BIN:-/bin/ubus}"
 JSONFILTER_BIN="${WARP_JSONFILTER_BIN:-/usr/bin/jsonfilter}"
-USQUE_BIN="${WARP_USQUE_BIN:-/usr/libexec/warp-usque}"
+SCOUT_BIN="${WARP_SCOUT_BIN:-/usr/libexec/warp-warpscout}"
+AWG_GO_BIN="${WARP_AWG_GO_BIN:-/usr/libexec/warp-amneziawg-go}"
+AWG_CTL_BIN="${WARP_AWG_CTL_BIN:-/usr/libexec/warp-awgctl}"
 API_BIN="${WARP_API_BIN:-/usr/libexec/warp-api}"
 IFUP_BIN="${WARP_IFUP_BIN:-/sbin/ifup}"
 IFDOWN_BIN="${WARP_IFDOWN_BIN:-/sbin/ifdown}"
 SERVICE_INIT="${WARP_SERVICE_INIT:-/etc/init.d/warp}"
+WATCHDOG_INIT="${WARP_WATCHDOG_INIT:-/etc/init.d/warp-watchdog}"
+PING_BIN="${WARP_PING_BIN:-/bin/ping}"
 
 lock_held=0
 temp_batch=
 temp_export=
 temp_snapshot=
 temp_txn=
-temp_usque_config=
-temp_usque_pid=
+temp_account=
+temp_full_config=
+temp_candidate=
+temp_old_config=
+config_swapped=0
+STOP_WATCHDOG=1
+START_WATCHDOG=1
 RUNTIME_START_ERROR=interface_up_failed
 
 cleanup() {
-	if [ -n "$temp_usque_pid" ]; then
-		kill -TERM "$temp_usque_pid" 2>/dev/null || true
-		wait "$temp_usque_pid" 2>/dev/null || true
-	fi
 	[ -z "$temp_batch" ] || rm -f -- "$temp_batch"
 	[ -z "$temp_export" ] || rm -f -- "$temp_export"
 	[ -z "$temp_snapshot" ] || rm -f -- "$temp_snapshot"
 	[ -z "$temp_txn" ] || rm -rf -- "$temp_txn"
-	[ -z "$temp_usque_config" ] || rm -f -- "$temp_usque_config"
+	[ -z "$temp_account" ] || rm -f -- "$temp_account"
+	[ -z "$temp_full_config" ] || rm -f -- "$temp_full_config"
+	[ -z "$temp_candidate" ] || rm -f -- "$temp_candidate"
+	[ -z "$temp_old_config" ] || rm -f -- "$temp_old_config"
 	rm -f -- "$FORCE_START_FILE" 2>/dev/null || true
 	if [ "$lock_held" -eq 1 ]; then
-		rm -rf -- "$LOCK_DIR"
+		rm -f -- "$LOCK_DIR/pid" 2>/dev/null || true
+		rmdir -- "$LOCK_DIR" 2>/dev/null || true
 	fi
 }
 trap cleanup EXIT HUP INT TERM
@@ -82,14 +92,17 @@ acquire_lock() {
 		''|*[!0-9]*) ;;
 		*) kill -0 "$old_pid" 2>/dev/null && emit_error 'operation_in_progress' ;;
 	esac
-	rm -rf -- "$LOCK_DIR" 2>/dev/null || emit_error 'lock_failed'
+	rm -f -- "$LOCK_DIR/pid" 2>/dev/null || emit_error 'lock_failed'
+	rmdir -- "$LOCK_DIR" 2>/dev/null || emit_error 'lock_failed'
 	mkdir "$LOCK_DIR" 2>/dev/null || emit_error 'operation_in_progress'
 	lock_held=1
 	printf '%s\n' "$$" >"$LOCK_DIR/pid"
 }
 
 require_dependencies() {
-	for path in "$UCI_BIN" "$UBUS_BIN" "$JSONFILTER_BIN" "$USQUE_BIN" "$API_BIN" "$IFUP_BIN" "$IFDOWN_BIN" "$SERVICE_INIT" /usr/bin/curl; do
+	for path in "$UCI_BIN" "$UBUS_BIN" "$JSONFILTER_BIN" "$SCOUT_BIN" "$AWG_GO_BIN" \
+		"$AWG_CTL_BIN" "$API_BIN" "$IFUP_BIN" "$IFDOWN_BIN" "$SERVICE_INIT" \
+		"$WATCHDOG_INIT" "$PING_BIN" /usr/bin/curl /sbin/ip; do
 		[ -x "$path" ] || emit_error 'dependency_missing'
 	done
 	[ -r /etc/ssl/certs/ca-certificates.crt ] || [ -r /etc/ssl/cert.pem ] || emit_error 'ca_bundle_missing'
@@ -119,27 +132,38 @@ valid_flag() {
 	[ "$1" = 0 ] || [ "$1" = 1 ]
 }
 
+valid_country_list() {
+	[ -z "$1" ] || printf '%s' "$1" | grep -Eq '^[A-Za-z]{2}(,[A-Za-z]{2})*$'
+}
+
+valid_node_list() {
+	[ -z "$1" ] || printf '%s' "$1" | grep -Eq '^[A-Za-z]{3}(,[A-Za-z]{3})*$'
+}
+
 validate_settings() {
 	CFG_AUTO=$(cfg_get auto_start 1)
 	CFG_INTERFACE=$(cfg_get interface warp)
 	CFG_MTU=$(cfg_get mtu 1280)
-	CFG_KEEPALIVE=$(cfg_get keepalive 5)
-	CFG_IPV4=$(cfg_get ipv4 1)
-	CFG_IPV6=$(cfg_get ipv6 1)
-	CFG_MASQUE_SNI=$(cfg_get masque_sni ozon.ru)
+	CFG_KEEPALIVE=$(cfg_get keepalive 25)
+	CFG_SNI=$(cfg_get sni ozon.ru)
+	CFG_EXCLUDE_COUNTRIES=$(cfg_get exclude_countries RU | tr '[:lower:]' '[:upper:]')
+	CFG_EXCLUDE_NODES=$(cfg_get exclude_nodes DME | tr '[:lower:]' '[:upper:]')
+	CFG_SCAN_SAMPLE=$(cfg_get scan_sample 5)
 	CFG_ACTUAL=$(cfg_get actual_interface '')
-	CFG_BACKEND=$(cfg_get actual_backend '')
+	CFG_STORED_BACKEND=$(cfg_get actual_backend '')
+	CFG_BACKEND=$CFG_STORED_BACKEND
 
 	valid_flag "$CFG_AUTO" || emit_error 'invalid_auto_start'
 	valid_uci_name "$CFG_INTERFACE" || emit_error 'invalid_interface_name'
-	valid_uint_range "$CFG_MTU" 576 9000 || emit_error 'invalid_mtu'
+	valid_uint_range "$CFG_MTU" 576 1420 || emit_error 'invalid_mtu'
 	valid_uint_range "$CFG_KEEPALIVE" 0 65535 || emit_error 'invalid_keepalive'
-	valid_flag "$CFG_IPV4" || emit_error 'invalid_ipv4_setting'
-	valid_flag "$CFG_IPV6" || emit_error 'invalid_ipv6_setting'
-	[ -z "$CFG_MASQUE_SNI" ] || valid_hostname "$CFG_MASQUE_SNI" || emit_error 'invalid_masque_sni'
+	valid_hostname "$CFG_SNI" || emit_error 'invalid_sni'
+	valid_country_list "$CFG_EXCLUDE_COUNTRIES" || emit_error 'invalid_excluded_countries'
+	valid_node_list "$CFG_EXCLUDE_NODES" || emit_error 'invalid_excluded_nodes'
+	valid_uint_range "$CFG_SCAN_SAMPLE" 1 256 || emit_error 'invalid_scan_sample'
 	[ -z "$CFG_ACTUAL" ] || valid_uci_name "$CFG_ACTUAL" || emit_error 'invalid_managed_interface'
-	case "$CFG_BACKEND" in ''|usque_masque) ;; *) emit_error 'invalid_backend' ;; esac
-	[ "$CFG_IPV4" = 1 ] || [ "$CFG_IPV6" = 1 ] || emit_error 'no_address_family'
+	[ -z "$CFG_STORED_BACKEND" ] || printf '%s' "$CFG_STORED_BACKEND" | grep -Eq '^[A-Za-z0-9_-]{1,32}$' || emit_error 'invalid_backend'
+	case "$CFG_BACKEND" in ''|amneziawg) ;; *) CFG_BACKEND= ;; esac
 }
 
 json_get() {
@@ -164,28 +188,27 @@ is_ipv6_address() {
 	[ -z "$prefix" ] || valid_uint_range "$prefix" 0 128
 }
 
-usque_profile_valid() {
-	profile=${1:-$USQUE_CONFIG}
-	[ -s "$profile" ] || return 1
-	USQUE_ID=$(json_get "$profile" '@.id')
-	USQUE_TOKEN=$(json_get "$profile" '@.access_token')
-	USQUE_PRIVATE_KEY=$(json_get "$profile" '@.private_key')
-	USQUE_ENDPOINT_V4=$(json_get "$profile" '@.endpoint_v4')
-	USQUE_ENDPOINT_PUBLIC=$(json_get "$profile" '@.endpoint_pub_key')
-	USQUE_IPV4=$(json_get "$profile" '@.ipv4')
-	USQUE_IPV6=$(json_get "$profile" '@.ipv6')
+base64_key_valid() {
+	[ "${#1}" -eq 44 ] && printf '%s' "$1" | grep -Eq '^[A-Za-z0-9+/]{43}=$'
+}
 
-	printf '%s' "$USQUE_ID" | grep -Eq '^[A-Za-z0-9._-]{8,128}$' || return 1
-	[ -n "$USQUE_TOKEN" ] && [ "${#USQUE_TOKEN}" -le 4096 ] || return 1
-	case "$USQUE_TOKEN" in *[!A-Za-z0-9._~+/=-]*) return 1 ;; esac
-	[ "${#USQUE_PRIVATE_KEY}" -ge 40 ] && [ "${#USQUE_PRIVATE_KEY}" -le 1024 ] || return 1
-	case "$USQUE_PRIVATE_KEY" in *[!A-Za-z0-9+/=]*) return 1 ;; esac
-	is_ipv4_address "$USQUE_ENDPOINT_V4" || return 1
-	printf '%s\n' "$USQUE_ENDPOINT_PUBLIC" | grep -q -- 'BEGIN PUBLIC KEY' || return 1
-	[ "${#USQUE_ENDPOINT_PUBLIC}" -le 4096 ] || return 1
-	[ -z "$USQUE_IPV4" ] || is_ipv4_address "$USQUE_IPV4" || return 1
-	[ -z "$USQUE_IPV6" ] || is_ipv6_address "$USQUE_IPV6" || return 1
-	[ -n "$USQUE_IPV4" ] || [ -n "$USQUE_IPV6" ] || return 1
+account_valid() {
+	profile=${1:-$ACCOUNT_FILE}
+	[ -s "$profile" ] || return 1
+	ACCOUNT_ID=$(json_get "$profile" '@.id')
+	ACCOUNT_TOKEN=$(json_get "$profile" '@.token')
+	ACCOUNT_PRIVATE_KEY=$(json_get "$profile" '@.private_key')
+	ACCOUNT_PUBLIC_KEY=$(json_get "$profile" '@.peer_public_key')
+	ACCOUNT_IPV4=$(json_get "$profile" '@.ipv4')
+	ACCOUNT_IPV6=$(json_get "$profile" '@.ipv6')
+
+	printf '%s' "$ACCOUNT_ID" | grep -Eq '^[A-Za-z0-9._-]{8,128}$' || return 1
+	[ -n "$ACCOUNT_TOKEN" ] && [ "${#ACCOUNT_TOKEN}" -le 4096 ] || return 1
+	case "$ACCOUNT_TOKEN" in *[!A-Za-z0-9._~+/=-]*) return 1 ;; esac
+	base64_key_valid "$ACCOUNT_PRIVATE_KEY" || return 1
+	base64_key_valid "$ACCOUNT_PUBLIC_KEY" || return 1
+	is_ipv4_address "$ACCOUNT_IPV4" || return 1
+	is_ipv6_address "$ACCOUNT_IPV6" || return 1
 }
 
 check_system_time() {
@@ -194,51 +217,132 @@ check_system_time() {
 	[ "$now" -ge 1704067200 ] || emit_error 'system_time_invalid'
 }
 
-ensure_usque_profile() {
-	if [ -e "$USQUE_CONFIG" ]; then
-		usque_profile_valid || emit_error 'invalid_usque_profile'
+ensure_account() {
+	if [ -e "$ACCOUNT_FILE" ]; then
+		account_valid || emit_error 'invalid_awg_account'
 		return
 	fi
-	temp_usque_config="$STATE_DIR/.usque.$$"
+	temp_account="$STATE_DIR/.awg-account.$$"
 	: >"$BACKEND_LOG" || emit_error 'state_write_failed'
 	chmod 600 "$BACKEND_LOG" || emit_error 'state_write_failed'
-	"$USQUE_BIN" --config "$temp_usque_config" register --accept-tos --name OpenWrt >"$BACKEND_LOG" 2>&1 &
-	temp_usque_pid=$!
-	profile_ready=0
-	wait_count=0
-	while [ "$wait_count" -lt 75 ]; do
-		if usque_profile_valid "$temp_usque_config"; then
-			profile_ready=1
-			break
+	if ! NO_COLOR=1 "$SCOUT_BIN" register --plain --relay none \
+		--account "$temp_account" --gen-i1 quic --i1-sni "$CFG_SNI" \
+		>"$BACKEND_LOG" 2>&1; then
+		rm -f -- "$temp_account"
+		if ! NO_COLOR=1 "$SCOUT_BIN" register --plain --relay none \
+			--account "$temp_account" >>"$BACKEND_LOG" 2>&1; then
+			emit_error 'awg_registration_failed'
 		fi
-		if ! kill -0 "$temp_usque_pid" 2>/dev/null; then
-			wait "$temp_usque_pid" 2>/dev/null || true
-			temp_usque_pid=
-			break
-		fi
-		sleep 1
-		wait_count=$((wait_count + 1))
-	done
-	if [ -n "$temp_usque_pid" ]; then
-		kill -TERM "$temp_usque_pid" 2>/dev/null || true
-		wait "$temp_usque_pid" 2>/dev/null || true
-		temp_usque_pid=
 	fi
-	[ "$profile_ready" -eq 1 ] || usque_profile_valid "$temp_usque_config" || emit_error 'masque_registration_failed'
-	chmod 600 "$temp_usque_config" || emit_error 'state_write_failed'
-	mv -f -- "$temp_usque_config" "$USQUE_CONFIG" || emit_error 'state_write_failed'
-	temp_usque_config=
-	chmod 600 "$USQUE_CONFIG" || emit_error 'state_write_failed'
-	usque_profile_valid || emit_error 'invalid_usque_profile'
+	account_valid "$temp_account" || emit_error 'invalid_awg_account'
+	chmod 600 "$temp_account" || emit_error 'state_write_failed'
+	mv -f -- "$temp_account" "$ACCOUNT_FILE" || emit_error 'state_write_failed'
+	temp_account=
+	chmod 600 "$ACCOUNT_FILE" || emit_error 'state_write_failed'
+	account_valid || emit_error 'invalid_awg_account'
 }
 
-select_address_families() {
-	USE_IPV4=0
-	USE_IPV6=0
-	[ "$CFG_IPV4" = 1 ] && [ -n "$USQUE_IPV4" ] && USE_IPV4=1
-	[ "$CFG_IPV6" = 1 ] && [ -n "$USQUE_IPV6" ] && [ -r /proc/sys/net/ipv6/conf/all/disable_ipv6 ] && \
-		[ "$(sed -n '1p' /proc/sys/net/ipv6/conf/all/disable_ipv6)" != 1 ] && USE_IPV6=1
-	[ "$USE_IPV4" = 1 ] || [ "$USE_IPV6" = 1 ] || emit_error 'no_registered_address_for_enabled_family'
+conf_value() {
+	awk -F= -v wanted="$2" '
+		BEGIN { wanted = tolower(wanted) }
+		{ key = $1; gsub(/^[[:space:]]+|[[:space:]]+$/, "", key) }
+		tolower(key) == wanted {
+			value = substr($0, index($0, "=") + 1)
+			gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+			print value
+			exit
+		}
+	' "$1"
+}
+
+endpoint_valid() {
+	host=${1%:*}
+	port=${1##*:}
+	[ "$host" != "$1" ] || return 1
+	is_ipv4_address "$host" || return 1
+	valid_uint_range "$port" 1 65535
+}
+
+awg_config_valid() {
+	profile=${1:-$AWG_CONFIG}
+	[ -s "$profile" ] || return 1
+	AWG_PRIVATE_KEY=$(conf_value "$profile" PrivateKey)
+	AWG_PUBLIC_KEY=$(conf_value "$profile" PublicKey)
+	AWG_ENDPOINT=$(conf_value "$profile" Endpoint)
+	AWG_ALLOWED_IPS=$(conf_value "$profile" AllowedIPs)
+	AWG_KEEPALIVE=$(conf_value "$profile" PersistentKeepalive)
+	AWG_JC=$(conf_value "$profile" Jc)
+	AWG_JMIN=$(conf_value "$profile" Jmin)
+	AWG_JMAX=$(conf_value "$profile" Jmax)
+	AWG_I1=$(conf_value "$profile" I1)
+
+	base64_key_valid "$AWG_PRIVATE_KEY" || return 1
+	base64_key_valid "$AWG_PUBLIC_KEY" || return 1
+	endpoint_valid "$AWG_ENDPOINT" || return 1
+	[ "$AWG_ALLOWED_IPS" = '0.0.0.0/0, ::/0' ] || return 1
+	valid_uint_range "$AWG_KEEPALIVE" 0 65535 || return 1
+	valid_uint_range "$AWG_JC" 1 128 || return 1
+	valid_uint_range "$AWG_JMIN" 1 1420 || return 1
+	valid_uint_range "$AWG_JMAX" "$AWG_JMIN" 1420 || return 1
+	[ -n "$AWG_I1" ] && [ "${#AWG_I1}" -le 8192 ] || return 1
+	grep -q '^\[Interface\]$' "$profile" || return 1
+	grep -q '^\[Peer\]$' "$profile" || return 1
+	! grep -Eqi '^[[:space:]]*(Address|DNS|Table|PreUp|PostUp|PreDown|PostDown)[[:space:]]*=' "$profile"
+}
+
+build_candidate() {
+	private_key=$(conf_value "$temp_full_config" PrivateKey)
+	public_key=$(conf_value "$temp_full_config" PublicKey)
+	endpoint=$(conf_value "$temp_full_config" Endpoint)
+	jc=$(conf_value "$temp_full_config" Jc)
+	jmin=$(conf_value "$temp_full_config" Jmin)
+	jmax=$(conf_value "$temp_full_config" Jmax)
+	i1=$(conf_value "$temp_full_config" I1)
+
+	temp_candidate="$STATE_DIR/.awg-conf.$$"
+	{
+		printf '# Managed by luci-app-warp.\n'
+		printf '# MTU: %s\n' "$CFG_MTU"
+		printf '[Interface]\n'
+		printf 'PrivateKey = %s\n' "$private_key"
+		printf 'Jc = %s\n' "$jc"
+		printf 'Jmin = %s\n' "$jmin"
+		printf 'Jmax = %s\n' "$jmax"
+		printf 'I1 = %s\n\n' "$i1"
+		printf '[Peer]\n'
+		printf 'PublicKey = %s\n' "$public_key"
+		printf 'Endpoint = %s\n' "$endpoint"
+		printf 'AllowedIPs = 0.0.0.0/0, ::/0\n'
+		printf 'PersistentKeepalive = %s\n' "$CFG_KEEPALIVE"
+	} >"$temp_candidate" || emit_error 'state_write_failed'
+	chmod 600 "$temp_candidate" || emit_error 'state_write_failed'
+	awg_config_valid "$temp_candidate" || emit_error 'invalid_awg_config'
+}
+
+scan_candidate() {
+	temp_full_config="$STATE_DIR/.warpscout-conf.$$"
+	: >"$BACKEND_LOG" || emit_error 'state_write_failed'
+	chmod 600 "$BACKEND_LOG" || emit_error 'state_write_failed'
+	set -- scan --plain --account "$ACCOUNT_FILE" --proto awg \
+		--gen-i1 quic --i1-sni "$CFG_SNI" --sample "$CFG_SCAN_SAMPLE" \
+		--tun-ping-count 10 --no-report --conf "$temp_full_config" \
+		--table-off --no-dns --mtu "$CFG_MTU"
+	[ -z "$CFG_EXCLUDE_COUNTRIES" ] || set -- "$@" --exclude-country "$CFG_EXCLUDE_COUNTRIES"
+	[ -z "$CFG_EXCLUDE_NODES" ] || set -- "$@" --exclude-node "$CFG_EXCLUDE_NODES"
+	if ! NO_COLOR=1 "$SCOUT_BIN" "$@" >"$BACKEND_LOG" 2>&1; then
+		emit_error 'endpoint_scan_failed'
+	fi
+	[ -s "$temp_full_config" ] || emit_error 'endpoint_scan_failed'
+	build_candidate
+	rm -f -- "$temp_full_config"
+	temp_full_config=
+}
+
+prepare_tunnel_config() {
+	rescan=$1
+	if [ "$rescan" = 1 ] || ! awg_config_valid; then
+		scan_candidate
+	fi
 }
 
 network_section_exists() {
@@ -299,7 +403,7 @@ restore_snapshot() {
 	rollback_dir="$STATE_DIR/.rollback.$$"
 	mkdir "$rollback_dir" 2>/dev/null || return 1
 	chmod 700 "$rollback_dir"
-	interface_owned "$ACTUAL_INTERFACE" && \
+	interface_owned "$ACTUAL_INTERFACE" &&
 		printf 'delete network.%s\n' "$ACTUAL_INTERFACE" | $UCI_BIN -q -t "$rollback_dir" batch >/dev/null 2>&1
 	if [ -s "$temp_snapshot" ]; then
 		$UCI_BIN -q -t "$rollback_dir" -m import network <"$temp_snapshot" >/dev/null 2>&1 || {
@@ -319,7 +423,7 @@ save_actual_state() {
 	chmod 700 "$names_dir"
 	{
 		printf "set warp.main.actual_interface='%s'\n" "$ACTUAL_INTERFACE"
-		printf "set warp.main.actual_backend='usque_masque'\n"
+		printf "set warp.main.actual_backend='amneziawg'\n"
 	} | $UCI_BIN -q -t "$names_dir" batch >/dev/null 2>&1 || {
 		rm -rf -- "$names_dir"
 		return 1
@@ -336,7 +440,7 @@ restore_actual_state() {
 	chmod 700 "$names_dir"
 	{
 		printf "set warp.main.actual_interface='%s'\n" "$CFG_ACTUAL"
-		printf "set warp.main.actual_backend='%s'\n" "$CFG_BACKEND"
+		printf "set warp.main.actual_backend='%s'\n" "$CFG_STORED_BACKEND"
 	} | $UCI_BIN -q -t "$names_dir" batch >/dev/null 2>&1 || true
 	$UCI_BIN -q -t "$names_dir" commit warp >/dev/null 2>&1
 	rc=$?
@@ -346,8 +450,6 @@ restore_actual_state() {
 
 apply_configuration() {
 	choose_interface
-	ensure_usque_profile
-	select_address_families
 	snapshot_managed_section || emit_error 'network_snapshot_failed'
 	[ -z "$CFG_ACTUAL" ] || $IFDOWN_BIN "$CFG_ACTUAL" >/dev/null 2>&1 || true
 
@@ -366,7 +468,7 @@ apply_configuration() {
 		printf "set network.%s.defaultroute='0'\n" "$ACTUAL_INTERFACE"
 		printf "set network.%s.peerdns='0'\n" "$ACTUAL_INTERFACE"
 		printf "set network.%s.delegate='0'\n" "$ACTUAL_INTERFACE"
-		printf "set network.%s.warp_backend='usque_masque'\n" "$ACTUAL_INTERFACE"
+		printf "set network.%s.warp_backend='amneziawg'\n" "$ACTUAL_INTERFACE"
 		printf "set network.%s.warp_managed='luci-app-warp'\n" "$ACTUAL_INTERFACE"
 	} >>"$temp_batch"
 
@@ -384,6 +486,37 @@ apply_configuration() {
 		$UBUS_BIN call network reload '{}' >/dev/null 2>&1 || true
 		emit_error 'network_reload_failed'
 	fi
+}
+
+install_candidate_config() {
+	[ -n "$temp_candidate" ] || return 0
+	if [ -e "$AWG_CONFIG" ]; then
+		temp_old_config="$STATE_DIR/.awg-old.$$"
+		mv -f -- "$AWG_CONFIG" "$temp_old_config" || return 1
+	fi
+	if ! mv -f -- "$temp_candidate" "$AWG_CONFIG"; then
+		[ -z "$temp_old_config" ] || mv -f -- "$temp_old_config" "$AWG_CONFIG" 2>/dev/null || true
+		return 1
+	fi
+	temp_candidate=
+	config_swapped=1
+	chmod 600 "$AWG_CONFIG" || return 1
+}
+
+rollback_live_config() {
+	[ "$config_swapped" -eq 1 ] || return 0
+	rm -f -- "$AWG_CONFIG"
+	if [ -n "$temp_old_config" ]; then
+		mv -f -- "$temp_old_config" "$AWG_CONFIG" || return 1
+		temp_old_config=
+	fi
+	config_swapped=0
+}
+
+discard_config_backup() {
+	[ -z "$temp_old_config" ] || rm -f -- "$temp_old_config"
+	temp_old_config=
+	config_swapped=0
 }
 
 set_interface_auto() {
@@ -405,6 +538,7 @@ set_interface_auto() {
 }
 
 runtime_stop() {
+	[ "$STOP_WATCHDOG" -eq 0 ] || "$WATCHDOG_INIT" stop >/dev/null 2>&1 || true
 	"$SERVICE_INIT" stop >/dev/null 2>&1 || true
 }
 
@@ -425,12 +559,14 @@ runtime_start() {
 		return 1
 	fi
 	wait_count=0
-	while [ "$wait_count" -lt 75 ]; do
-		[ -r "/sys/class/net/$ACTUAL_INTERFACE/tun_flags" ] && break
+	while [ "$wait_count" -lt 30 ]; do
+		[ -r "/sys/class/net/$ACTUAL_INTERFACE/tun_flags" ] &&
+			[ -S "/var/run/amneziawg/$ACTUAL_INTERFACE.sock" ] && break
 		sleep 1
 		wait_count=$((wait_count + 1))
 	done
-	if [ ! -r "/sys/class/net/$ACTUAL_INTERFACE/tun_flags" ]; then
+	if [ ! -r "/sys/class/net/$ACTUAL_INTERFACE/tun_flags" ] ||
+		[ ! -S "/var/run/amneziawg/$ACTUAL_INTERFACE.sock" ]; then
 		RUNTIME_START_ERROR=tunnel_start_timeout
 		return 1
 	fi
@@ -442,17 +578,29 @@ runtime_start() {
 		RUNTIME_START_ERROR=interface_up_failed
 		return 1
 	fi
+	wait_count=0
+	while [ "$wait_count" -lt 10 ]; do
+		if "$PING_BIN" -4 -I "$ACTUAL_INTERFACE" -c 1 -W 2 1.1.1.1 >/dev/null 2>&1; then
+			[ "$START_WATCHDOG" -eq 0 ] || "$WATCHDOG_INIT" restart >/dev/null 2>&1 || true
+			return 0
+		fi
+		sleep 1
+		wait_count=$((wait_count + 1))
+	done
+	RUNTIME_START_ERROR=data_plane_unavailable
+	return 1
 }
 
 rollback_configuration() {
-	runtime_stop
+	"$SERVICE_INIT" stop >/dev/null 2>&1 || true
+	rollback_live_config || return 1
 	restore_snapshot || return 1
 	restore_actual_state || return 1
 	$UBUS_BIN call network reload '{}' >/dev/null 2>&1 || return 1
 	if [ -n "$CFG_ACTUAL" ] && interface_owned "$CFG_ACTUAL"; then
 		$IFUP_BIN "$CFG_ACTUAL" >/dev/null 2>&1 || true
 	fi
-	if [ "$CFG_BACKEND" = usque_masque ] && [ -s "$USQUE_CONFIG" ]; then
+	if [ "$CFG_BACKEND" = amneziawg ] && awg_config_valid; then
 		runtime_restart_service || return 1
 	fi
 }
@@ -462,7 +610,7 @@ remove_managed_network() {
 	remove_dir="$STATE_DIR/.remove.$$"
 	mkdir "$remove_dir" 2>/dev/null || emit_error 'uci_stage_failed'
 	chmod 700 "$remove_dir"
-	interface_owned "$name" && printf 'delete network.%s\n' "$name" | \
+	interface_owned "$name" && printf 'delete network.%s\n' "$name" |
 		$UCI_BIN -q -t "$remove_dir" batch >/dev/null 2>&1 || true
 	$UCI_BIN -q -t "$remove_dir" commit network >/dev/null 2>&1 || {
 		rm -rf -- "$remove_dir"
@@ -488,33 +636,51 @@ clear_actual_state() {
 
 connect_tunnel() {
 	success_code=$1
+	rescan=$2
+	recovery=$3
+	[ "$recovery" -eq 0 ] || {
+		STOP_WATCHDOG=0
+		START_WATCHDOG=0
+	}
 	require_dependencies
 	validate_settings
 	mkdir -p "$STATE_DIR" 2>/dev/null || emit_error 'state_directory_failed'
 	chmod 700 "$STATE_DIR" || emit_error 'state_directory_failed'
 	check_system_time
+	ensure_account
+	prepare_tunnel_config "$rescan"
 	runtime_stop
 	apply_configuration
+	if ! install_candidate_config; then
+		rollback_configuration || emit_error 'rollback_failed'
+		emit_error 'state_write_failed'
+	fi
 	if ! runtime_start; then
 		rollback_configuration || emit_error 'rollback_failed'
 		emit_error "$RUNTIME_START_ERROR"
 	fi
+	discard_config_backup
 	emit_success "$success_code" "$ACTUAL_INTERFACE"
 }
 
 do_register() {
 	acquire_lock
-	connect_tunnel 'connected'
+	connect_tunnel 'connected' 1 0
 }
 
 do_enable() {
 	acquire_lock
-	connect_tunnel 'enabled'
+	connect_tunnel 'enabled' 0 0
 }
 
 do_reconnect() {
 	acquire_lock
-	connect_tunnel 'reconnected'
+	connect_tunnel 'reconnected' 1 0
+}
+
+do_recover() {
+	acquire_lock
+	connect_tunnel 'recovered' 1 1
 }
 
 do_disable() {
@@ -534,9 +700,9 @@ do_unregister() {
 	acquire_lock
 	require_dependencies
 	validate_settings
-	if [ -e "$USQUE_CONFIG" ]; then
-		usque_profile_valid || emit_error 'invalid_usque_profile'
-		api_error=$($API_BIN unregister "$USQUE_CONFIG" 2>&1 >/dev/null)
+	if [ -e "$ACCOUNT_FILE" ]; then
+		account_valid || emit_error 'invalid_awg_account'
+		api_error=$($API_BIN unregister "$ACCOUNT_FILE" "$CFG_ACTUAL" 2>&1 >/dev/null)
 		api_rc=$?
 		[ "$api_rc" -eq 0 ] || emit_error "${api_error:-unregister_failed}"
 	fi
@@ -547,7 +713,7 @@ do_unregister() {
 	remove_managed_network "$CFG_ACTUAL"
 	clear_actual_state
 	$UBUS_BIN call network reload '{}' >/dev/null 2>&1 || emit_error 'network_reload_failed'
-	rm -f -- "$USQUE_CONFIG" "$BACKEND_LOG" "$DISABLED_FILE" "$LAST_ERROR"
+	rm -f -- "$ACCOUNT_FILE" "$AWG_CONFIG" "$BACKEND_LOG" "$DISABLED_FILE" "$LAST_ERROR"
 	emit_success 'unregistered' ''
 }
 
@@ -558,19 +724,30 @@ do_status() {
 	managed=false
 	up=false
 	error_code=
+	endpoint=
+	last_handshake=0
+	rx_bytes=0
+	tx_bytes=0
 
 	if [ -d "$LOCK_DIR" ]; then
 		state=registering
-	elif [ -e "$USQUE_CONFIG" ]; then
-		if usque_profile_valid; then
+	elif [ -e "$ACCOUNT_FILE" ]; then
+		if account_valid; then
 			registered=true
-			if [ -n "$CFG_ACTUAL" ] && interface_owned "$CFG_ACTUAL"; then
+			if ! awg_config_valid; then
+				state=error
+				error_code=invalid_awg_config
+			elif [ -n "$CFG_ACTUAL" ] && interface_owned "$CFG_ACTUAL"; then
 				managed=true
+				endpoint=$AWG_ENDPOINT
 				if [ -e "$DISABLED_FILE" ]; then
 					state=disabled
 				elif [ -r "/sys/class/net/$CFG_ACTUAL/tun_flags" ]; then
 					up=true
 					state=interface_up
+					last_handshake=$($AWG_CTL_BIN get "$CFG_ACTUAL" last_handshake_time_sec 2>/dev/null || printf '0')
+					rx_bytes=$($AWG_CTL_BIN get "$CFG_ACTUAL" rx_bytes 2>/dev/null || printf '0')
+					tx_bytes=$($AWG_CTL_BIN get "$CFG_ACTUAL" tx_bytes 2>/dev/null || printf '0')
 				else
 					state=interface_created
 				fi
@@ -579,16 +756,22 @@ do_status() {
 			fi
 		else
 			state=error
-			error_code=invalid_usque_profile
+			error_code=invalid_awg_account
 		fi
 	fi
+	for number in "$last_handshake" "$rx_bytes" "$tx_bytes"; do
+		case "$number" in ''|*[!0-9]*) last_handshake=0; rx_bytes=0; tx_bytes=0; break ;; esac
+	done
 	if [ -s "$LAST_ERROR" ]; then
 		error_code=$(sed -n '1p' "$LAST_ERROR")
 		[ "$state" = not_configured ] || [ "$state" = registering ] || state=error
 	fi
-	printf '{"ok":true,"state":"%s","interface":"%s","backend":"%s","registered":%s,"managed":%s,"up":%s,"error_code":"%s"}\n' \
-		"$(json_escape "$state")" "$(json_escape "$CFG_ACTUAL")" "$(json_escape "$CFG_BACKEND")" \
-		"$registered" "$managed" "$up" "$(json_escape "$error_code")"
+	backend=
+	[ "$CFG_BACKEND" != amneziawg ] || backend=amneziawg
+	printf '{"ok":true,"state":"%s","interface":"%s","backend":"%s","registered":%s,"managed":%s,"up":%s,"endpoint":"%s","last_handshake":%s,"rx_bytes":%s,"tx_bytes":%s,"error_code":"%s"}\n' \
+		"$(json_escape "$state")" "$(json_escape "$CFG_ACTUAL")" "$(json_escape "$backend")" \
+		"$registered" "$managed" "$up" "$(json_escape "$endpoint")" "$last_handshake" \
+		"$rx_bytes" "$tx_bytes" "$(json_escape "$error_code")"
 }
 
 case "${1:-}" in
@@ -598,5 +781,6 @@ case "${1:-}" in
 	reconnect) do_reconnect ;;
 	status) do_status ;;
 	unregister) do_unregister ;;
+	recover) do_recover ;;
 	*) emit_error 'invalid_action' ;;
 esac
