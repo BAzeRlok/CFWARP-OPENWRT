@@ -24,7 +24,7 @@ IFDOWN_BIN="${WARP_IFDOWN_BIN:-/sbin/ifdown}"
 SERVICE_INIT="${WARP_SERVICE_INIT:-/etc/init.d/warp}"
 WATCHDOG_INIT="${WARP_WATCHDOG_INIT:-/etc/init.d/warp-watchdog}"
 PING_BIN="${WARP_PING_BIN:-/bin/ping}"
-SCOUT_JOBS="${WARP_SCOUT_JOBS:-1}"
+SCOUT_JOBS="${WARP_SCOUT_JOBS:-2}"
 
 lock_held=0
 temp_batch=
@@ -39,6 +39,7 @@ config_swapped=0
 STOP_WATCHDOG=1
 START_WATCHDOG=1
 RUNTIME_START_ERROR=interface_up_failed
+INITIAL_SCAN=0
 
 cleanup() {
 	[ -z "$temp_batch" ] || rm -f -- "$temp_batch"
@@ -233,8 +234,6 @@ ensure_account() {
 		return
 	fi
 	temp_account="$STATE_DIR/.awg-account.$$"
-	: >"$BACKEND_LOG" || emit_error 'state_write_failed'
-	chmod 600 "$BACKEND_LOG" || emit_error 'state_write_failed'
 	if ! GOMAXPROCS=1 NO_COLOR=1 "$SCOUT_BIN" register --plain --relay none \
 		--account "$temp_account" --gen-i1 quic --i1-sni "$CFG_SNI" \
 		>"$BACKEND_LOG" 2>&1; then
@@ -250,6 +249,10 @@ ensure_account() {
 	temp_account=
 	chmod 600 "$ACCOUNT_FILE" || emit_error 'state_write_failed'
 	account_valid || emit_error 'invalid_awg_account'
+}
+
+backend_note() {
+	printf '[%s] %s\n' "$(date -u '+%Y-%m-%d %H:%M:%S UTC')" "$1" >>"$BACKEND_LOG"
 }
 
 conf_value() {
@@ -329,24 +332,39 @@ build_candidate() {
 	awg_config_valid "$temp_candidate" || emit_error 'invalid_awg_config'
 }
 
-scan_candidate() {
-	temp_full_config="$STATE_DIR/.warpscout-conf.$$"
-	: >"$BACKEND_LOG" || emit_error 'state_write_failed'
-	chmod 600 "$BACKEND_LOG" || emit_error 'state_write_failed'
+run_endpoint_scan() {
+	scan_sample=$1
+	rm -f -- "$temp_full_config"
 	set -- scan --plain --account "$ACCOUNT_FILE" --proto awg \
-		--gen-i1 quic --i1-sni "$CFG_SNI" --sample "$CFG_SCAN_SAMPLE" \
+		--gen-i1 quic --i1-sni "$CFG_SNI" --sample "$scan_sample" \
 		--tunnel-jobs "$SCOUT_JOBS" --tun-ping-count 10 \
 		--no-report --conf "$temp_full_config" \
 		--table-off --no-dns --mtu "$CFG_MTU"
 	[ -z "$CFG_EXCLUDE_COUNTRIES" ] || set -- "$@" --exclude-country "$CFG_EXCLUDE_COUNTRIES"
 	[ -z "$CFG_EXCLUDE_NODES" ] || set -- "$@" --exclude-node "$CFG_EXCLUDE_NODES"
-	if ! GOMAXPROCS=1 NO_COLOR=1 "$SCOUT_BIN" "$@" >"$BACKEND_LOG" 2>&1; then
-		emit_error 'endpoint_scan_failed'
-	fi
-	[ -s "$temp_full_config" ] || emit_error 'endpoint_scan_failed'
+	GOMAXPROCS=1 NO_COLOR=1 "$SCOUT_BIN" "$@" >>"$BACKEND_LOG" 2>&1 &&
+		[ -s "$temp_full_config" ]
+}
+
+accept_scanned_candidate() {
 	build_candidate
 	rm -f -- "$temp_full_config"
 	temp_full_config=
+}
+
+scan_candidate() {
+	temp_full_config="$STATE_DIR/.warpscout-conf.$$"
+	if [ "$INITIAL_SCAN" -eq 1 ] && [ "$CFG_SCAN_SAMPLE" -gt 1 ]; then
+		backend_note "Fast initial endpoint scan: sample 1, workers $SCOUT_JOBS"
+		if run_endpoint_scan 1; then
+			accept_scanned_candidate
+			return
+		fi
+		backend_note "Fast scan found no suitable endpoint; starting full scan"
+	fi
+	backend_note "Endpoint scan: sample $CFG_SCAN_SAMPLE, workers $SCOUT_JOBS"
+	run_endpoint_scan "$CFG_SCAN_SAMPLE" || emit_error 'endpoint_scan_failed'
+	accept_scanned_candidate
 }
 
 prepare_tunnel_config() {
@@ -668,7 +686,13 @@ connect_tunnel() {
 	validate_settings
 	mkdir -p "$STATE_DIR" 2>/dev/null || emit_error 'state_directory_failed'
 	chmod 700 "$STATE_DIR" || emit_error 'state_directory_failed'
+	: >"$BACKEND_LOG" || emit_error 'state_write_failed'
+	chmod 600 "$BACKEND_LOG" || emit_error 'state_write_failed'
 	check_system_time
+	if ! account_valid || ! awg_config_valid; then
+		INITIAL_SCAN=1
+		rescan=1
+	fi
 	ensure_account
 	prepare_tunnel_config "$rescan"
 	runtime_stop

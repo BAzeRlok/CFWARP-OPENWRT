@@ -6,7 +6,7 @@ umask 077
 REPOSITORY="BAzeRlok/CFWARP-OPENWRT"
 RELEASE_TAG="v3.0.0"
 RELEASE_URL="https://github.com/$REPOSITORY/releases/download/$RELEASE_TAG"
-LUCI_PACKAGE="luci-app-warp-3.0.0-r3.apk"
+LUCI_PACKAGE="luci-app-warp-3.0.0-r4.apk"
 I18N_PACKAGE="luci-i18n-warp-ru-3.0.0.apk"
 MASKING_SNI="${WARP_SNI:-ozon.ru}"
 EXCLUDE_COUNTRIES="${WARP_EXCLUDE_COUNTRIES:-RU}"
@@ -83,7 +83,7 @@ rm -f /tmp/luci-indexcache.*
 rm -rf /tmp/luci-modulecache/
 
 printf 'Регистрация и запуск WARP...\n'
-result=$(/usr/libexec/warp-manager reconnect)
+result=$(/usr/libexec/warp-manager enable)
 printf '%s\n' "$result"
 case "$result" in
 	*'"ok":true'*) ;;
