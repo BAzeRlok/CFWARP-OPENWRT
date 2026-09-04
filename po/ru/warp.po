@@ -27,10 +27,6 @@ msgstr "Принять и подключить"
 msgid "Another WARP operation is already in progress."
 msgstr "Уже выполняется другая операция WARP."
 
-#: htdocs/luci-static/resources/view/warp/overview.js:178
-msgid "Backend"
-msgstr "Backend"
-
 #: htdocs/luci-static/resources/view/warp/overview.js:140
 #: htdocs/luci-static/resources/view/warp/overview.js:158
 msgid "Cancel"
@@ -39,11 +35,6 @@ msgstr "Отмена"
 #: htdocs/luci-static/resources/view/warp/overview.js:43
 msgid "Cloudflare API name resolution failed."
 msgstr "Не удалось разрешить имя API Cloudflare."
-
-#: htdocs/luci-static/resources/view/warp/overview.js:273
-#: root/usr/share/luci/menu.d/luci-app-warp.json:3
-msgid "Cloudflare WARP"
-msgstr "Cloudflare WARP"
 
 #: htdocs/luci-static/resources/view/warp/overview.js:134
 msgid "Cloudflare privacy policy"
@@ -409,13 +400,14 @@ msgstr "Введите двухбуквенные коды стран через
 msgid "Used only in the fake first AWG packet; it does not change DNS."
 msgstr "Используется только в маскирующем первом пакете AWG и не меняет DNS."
 
-#: root/usr/share/rpcd/acl.d/luci-app-warp.json:3
-msgid "View and manage the standalone Cloudflare WARP interface"
-msgstr "Просмотр и управление отдельным интерфейсом Cloudflare WARP"
+#: htdocs/luci-static/resources/view/warp/overview.js:267
+#: root/usr/share/luci/menu.d/luci-app-warp.json:3
+msgid "WARP"
+msgstr "WARP"
 
-#: htdocs/luci-static/resources/view/warp/overview.js:34
-msgid "WARP AmneziaWG"
-msgstr "WARP AmneziaWG"
+#: root/usr/share/rpcd/acl.d/luci-app-warp.json:3
+msgid "View and manage the standalone WARP interface"
+msgstr "Просмотр и управление отдельным интерфейсом WARP"
 
 #: htdocs/luci-static/resources/view/warp/overview.js:55
 msgid "WARP registration failed. Check /etc/warp/backend.log."

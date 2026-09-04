@@ -30,10 +30,6 @@ const stateLabels = {
 	error: _('Error')
 };
 
-const backendLabels = {
-	amneziawg: _('WARP AmneziaWG')
-};
-
 const errorLabels = {
 	operation_in_progress: _('Another WARP operation is already in progress.'),
 	dependency_missing: _('A required package is missing.'),
@@ -174,8 +170,6 @@ return view.extend({
 			_('Status'), state,
 			_('Interface'), status.interface || _('Not created')
 		];
-		if (status.backend)
-			rows.push(_('Backend'), backendLabels[status.backend] || status.backend);
 		if (status.endpoint)
 			rows.push(_('Endpoint'), status.endpoint);
 		if (status.error_code)
@@ -270,7 +264,7 @@ return view.extend({
 
 		return map.render().then(L.bind(function(formNode) {
 			const content = [
-				E('h2', {}, _('Cloudflare WARP')),
+				E('h2', {}, _('WARP')),
 				E('div', { 'class': 'cbi-section' }, [
 					E('p', {}, _('Traffic uses WAN until you select this interface in your routing configuration. Reconnect scans for a new verified endpoint.')),
 					this.renderStatus(status),

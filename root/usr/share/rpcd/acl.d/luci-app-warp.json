@@ -1,6 +1,6 @@
 {
 	"luci-app-warp": {
-		"description": "View and manage the standalone Cloudflare WARP interface",
+		"description": "View and manage the standalone WARP interface",
 		"read": {
 			"ubus": {
 				"luci.warp": [ "status" ]

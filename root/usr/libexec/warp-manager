@@ -25,6 +25,8 @@ SERVICE_INIT="${WARP_SERVICE_INIT:-/etc/init.d/warp}"
 WATCHDOG_INIT="${WARP_WATCHDOG_INIT:-/etc/init.d/warp-watchdog}"
 PING_BIN="${WARP_PING_BIN:-/bin/ping}"
 SCOUT_JOBS="${WARP_SCOUT_JOBS:-2}"
+SCOUT_FAST_TARGETS='162.159.192.0/24,188.114.96.0/24,188.114.97.0/24'
+SCOUT_PING_TARGET='8.8.8.8'
 
 lock_held=0
 temp_batch=
@@ -334,12 +336,15 @@ build_candidate() {
 
 run_endpoint_scan() {
 	scan_sample=$1
+	scan_targets=${2:-}
 	rm -f -- "$temp_full_config"
 	set -- scan --plain --account "$ACCOUNT_FILE" --proto awg \
 		--gen-i1 quic --i1-sni "$CFG_SNI" --sample "$scan_sample" \
 		--tunnel-jobs "$SCOUT_JOBS" --tun-ping-count 10 \
+		--ping-target "$SCOUT_PING_TARGET" \
 		--no-report --conf "$temp_full_config" \
 		--table-off --no-dns --mtu "$CFG_MTU"
+	[ -z "$scan_targets" ] || set -- "$@" --target "$scan_targets"
 	[ -z "$CFG_EXCLUDE_COUNTRIES" ] || set -- "$@" --exclude-country "$CFG_EXCLUDE_COUNTRIES"
 	[ -z "$CFG_EXCLUDE_NODES" ] || set -- "$@" --exclude-node "$CFG_EXCLUDE_NODES"
 	GOMAXPROCS=1 NO_COLOR=1 "$SCOUT_BIN" "$@" >>"$BACKEND_LOG" 2>&1 &&
@@ -355,14 +360,14 @@ accept_scanned_candidate() {
 scan_candidate() {
 	temp_full_config="$STATE_DIR/.warpscout-conf.$$"
 	if [ "$INITIAL_SCAN" -eq 1 ] && [ "$CFG_SCAN_SAMPLE" -gt 1 ]; then
-		backend_note "Fast initial endpoint scan: sample 1, workers $SCOUT_JOBS"
-		if run_endpoint_scan 1; then
+		backend_note "Fast initial endpoint scan: core pools, sample 1, workers $SCOUT_JOBS, ping target $SCOUT_PING_TARGET"
+		if run_endpoint_scan 1 "$SCOUT_FAST_TARGETS"; then
 			accept_scanned_candidate
 			return
 		fi
 		backend_note "Fast scan found no suitable endpoint; starting full scan"
 	fi
-	backend_note "Endpoint scan: sample $CFG_SCAN_SAMPLE, workers $SCOUT_JOBS"
+	backend_note "Endpoint scan: sample $CFG_SCAN_SAMPLE, workers $SCOUT_JOBS, ping target $SCOUT_PING_TARGET"
 	run_endpoint_scan "$CFG_SCAN_SAMPLE" || emit_error 'endpoint_scan_failed'
 	accept_scanned_candidate
 }

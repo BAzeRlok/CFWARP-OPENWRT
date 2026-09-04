@@ -1,6 +1,6 @@
 {
 	"admin/network/warp": {
-		"title": "Cloudflare WARP",
+		"title": "WARP",
 		"order": 90,
 		"action": {
 			"type": "view",

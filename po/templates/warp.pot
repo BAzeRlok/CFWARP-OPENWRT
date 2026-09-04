@@ -17,10 +17,6 @@ msgstr ""
 msgid "Another WARP operation is already in progress."
 msgstr ""
 
-#: htdocs/luci-static/resources/view/warp/overview.js:178
-msgid "Backend"
-msgstr ""
-
 #: htdocs/luci-static/resources/view/warp/overview.js:140
 #: htdocs/luci-static/resources/view/warp/overview.js:158
 msgid "Cancel"
@@ -28,11 +24,6 @@ msgstr ""
 
 #: htdocs/luci-static/resources/view/warp/overview.js:43
 msgid "Cloudflare API name resolution failed."
-msgstr ""
-
-#: htdocs/luci-static/resources/view/warp/overview.js:273
-#: root/usr/share/luci/menu.d/luci-app-warp.json:3
-msgid "Cloudflare WARP"
 msgstr ""
 
 #: htdocs/luci-static/resources/view/warp/overview.js:134
@@ -389,12 +380,13 @@ msgstr ""
 msgid "Used only in the fake first AWG packet; it does not change DNS."
 msgstr ""
 
-#: root/usr/share/rpcd/acl.d/luci-app-warp.json:3
-msgid "View and manage the standalone Cloudflare WARP interface"
+#: htdocs/luci-static/resources/view/warp/overview.js:267
+#: root/usr/share/luci/menu.d/luci-app-warp.json:3
+msgid "WARP"
 msgstr ""
 
-#: htdocs/luci-static/resources/view/warp/overview.js:34
-msgid "WARP AmneziaWG"
+#: root/usr/share/rpcd/acl.d/luci-app-warp.json:3
+msgid "View and manage the standalone WARP interface"
 msgstr ""
 
 #: htdocs/luci-static/resources/view/warp/overview.js:55

@@ -2,12 +2,13 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-warp
 PKG_VERSION:=3.0.0
-PKG_RELEASE:=4
+PKG_RELEASE:=5
 PKG_LICENSE:=Apache-2.0
 PKG_MAINTAINER:=luci-app-warp contributors
 
-LUCI_TITLE:=LuCI support for a standalone Cloudflare WARP interface
-LUCI_DESCRIPTION:=Register Cloudflare WARP, select a verified foreign endpoint and manage a route-free standalone AmneziaWG interface
+LUCI_TITLE:=WARP
+LUCI_DESCRIPTION:=Standalone WARP interface with automatic endpoint selection
+LUCI_URL:=https://github.com/BAzeRlok/CFWARP-OPENWRT
 LUCI_DEPENDS:=+luci-base +curl +jsonfilter
 LUCI_EXTRA_DEPENDS:=warp-awg (>=3.1.20260828-r3), warp-warpscout (>=0.16.0-r1)
 LUCI_PKGARCH:=all

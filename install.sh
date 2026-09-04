@@ -6,7 +6,7 @@ umask 077
 REPOSITORY="BAzeRlok/CFWARP-OPENWRT"
 RELEASE_TAG="v3.0.0"
 RELEASE_URL="https://github.com/$REPOSITORY/releases/download/$RELEASE_TAG"
-LUCI_PACKAGE="luci-app-warp-3.0.0-r4.apk"
+LUCI_PACKAGE="luci-app-warp-3.0.0-r5.apk"
 I18N_PACKAGE="luci-i18n-warp-ru-3.0.0.apk"
 MASKING_SNI="${WARP_SNI:-ozon.ru}"
 EXCLUDE_COUNTRIES="${WARP_EXCLUDE_COUNTRIES:-RU}"
@@ -60,7 +60,7 @@ esac
 INSTALL_DIR=$(mktemp -d /tmp/cfwarp-install.XXXXXX) || die 'не удалось создать временный каталог'
 trap 'rm -rf "$INSTALL_DIR"' EXIT HUP INT TERM
 
-printf 'Скачивание CFWARP %s для %s...\n' "$RELEASE_TAG" "$ARCH"
+printf 'Скачивание WARP %s для %s...\n' "$RELEASE_TAG" "$ARCH"
 download "$RELEASE_URL/SHA256SUMS" "$INSTALL_DIR/SHA256SUMS"
 for package in "$AWG_PACKAGE" "$SCOUT_PACKAGE" "$LUCI_PACKAGE" "$I18N_PACKAGE"; do
 	download "$RELEASE_URL/$package" "$INSTALL_DIR/$package"
