@@ -3,8 +3,10 @@
 import json
 import pathlib
 import re
+import socket
 import subprocess
 import tempfile
+import threading
 import unittest
 
 
@@ -15,7 +17,7 @@ RUNNER = ROOT / "root/usr/libexec/warp-awg-runner"
 WATCHDOG = ROOT / "root/usr/libexec/warp-watchdog"
 RPC = ROOT / "root/usr/share/rpcd/ucode/warp.uc"
 FRONTEND = ROOT / "htdocs/luci-static/resources/view/warp/overview.js"
-AWG_CTL = ROOT / "warp-awg/files/warp-awgctl.go"
+AWG_CTL = ROOT / "warp-awg/files/warp-awgctl.c"
 
 
 def catalog_msgids(path):
@@ -54,10 +56,77 @@ class PackageTests(unittest.TestCase):
     def test_awg_controller_builds(self):
         with tempfile.TemporaryDirectory() as directory:
             output = pathlib.Path(directory) / "warp-awgctl"
-            subprocess.run(["go", "build", "-o", output, AWG_CTL], check=True)
+            subprocess.run(
+                ["cc", "-std=c11", "-Os", "-Wall", "-Wextra", "-Werror", "-o", output, AWG_CTL],
+                check=True,
+            )
             result = subprocess.run([output], text=True, capture_output=True)
             self.assertEqual(result.returncode, 2)
             self.assertIn("setconf INTERFACE FILE", result.stderr)
+
+    def test_awg_controller_uapi(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            output = root / "warp-awgctl"
+            config = root / "awg.conf"
+            socket_path = root / "warp.sock"
+            subprocess.run(
+                ["cc", "-std=c11", "-Os", "-Wall", "-Wextra", "-Werror", "-o", output, AWG_CTL],
+                check=True,
+            )
+            config.write_text(
+                """# MTU: 1280
+[Interface]
+PrivateKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+Jc = 6
+Jmin = 10
+Jmax = 50
+I1 = <r 2><b 0x010203>
+
+[Peer]
+PublicKey = bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=
+Endpoint = 162.159.192.1:2408
+AllowedIPs = 0.0.0.0/0, ::/0
+PersistentKeepalive = 25
+""",
+                encoding="utf-8",
+            )
+
+            requests = []
+            ready = threading.Event()
+
+            def server():
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+                    listener.bind(str(socket_path))
+                    listener.listen(2)
+                    ready.set()
+                    for response in [b"errno=0\n\n", b"rx_bytes=1234\nerrno=0\n\n"]:
+                        connection, _ = listener.accept()
+                        with connection:
+                            request = b""
+                            while b"\n\n" not in request:
+                                request += connection.recv(4096)
+                            requests.append(request.decode())
+                            connection.sendall(response)
+
+            worker = threading.Thread(target=server)
+            worker.start()
+            ready.wait(timeout=2)
+            environment = {"WARP_AWG_SOCKET_DIR": directory}
+            subprocess.run([output, "setconf", "warp", config], env=environment, check=True)
+            result = subprocess.run(
+                [output, "get", "warp", "rx_bytes"],
+                env=environment,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            worker.join(timeout=2)
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(result.stdout, "1234\n")
+            self.assertIn("replace_peers=true\n", requests[0])
+            self.assertIn("endpoint=162.159.192.1:2408\n", requests[0])
+            self.assertEqual(requests[1], "get=1\n\n")
 
     def test_json_files(self):
         for path in ROOT.rglob("*.json"):
@@ -111,12 +180,16 @@ class PackageTests(unittest.TestCase):
         runner = RUNNER.read_text(encoding="utf-8")
         watchdog = WATCHDOG.read_text(encoding="utf-8")
         awg_package = (ROOT / "warp-awg/Makefile").read_text(encoding="utf-8")
+        awg_memory_patch = (ROOT / "warp-awg/patches/100-openwrt-memory.patch").read_text(encoding="utf-8")
         scout_package = (ROOT / "warp-warpscout/Makefile").read_text(encoding="utf-8")
         scout_patch = (ROOT / "warp-warpscout/patches/100-awg-only.patch").read_text(encoding="utf-8")
 
         self.assertIn('SCOUT_BIN="${WARP_SCOUT_BIN:-/usr/libexec/warp-warpscout}"', manager)
         self.assertIn("--proto awg", manager)
         self.assertIn("--gen-i1 quic", manager)
+        self.assertIn('--tunnel-jobs "$SCOUT_JOBS"', manager)
+        self.assertIn('SCOUT_JOBS="${WARP_SCOUT_JOBS:-1}"', manager)
+        self.assertIn('GOMAXPROCS=1 NO_COLOR=1 "$SCOUT_BIN"', manager)
         self.assertIn("--tun-ping-count 10", manager)
         self.assertIn("--exclude-country", manager)
         self.assertIn("set warp.main.actual_backend='amneziawg'", manager)
@@ -124,16 +197,20 @@ class PackageTests(unittest.TestCase):
         self.assertIn("/usr/libexec/warp-amneziawg-go", runner)
         self.assertIn("/usr/libexec/warp-awgctl", runner)
         self.assertIn('address replace "$ipv4/32"', runner)
-        self.assertIn("selecting another endpoint", watchdog)
+        self.assertIn("restarting the current endpoint", watchdog)
         self.assertIn("$MANAGER recover", watchdog)
-        self.assertIn('healthy=0', watchdog)
+        self.assertIn('MAX_FAILURES="${WARP_WATCHDOG_FAILURES:-5}"', watchdog)
+        self.assertIn("last_rx=0", watchdog)
         self.assertNotIn('failures=$((failures + 1))\n\t\tcontinue', watchdog)
         self.assertNotIn("/etc/config/zapret", manager + init + runner)
         self.assertNotIn("/opt/zapret", manager + init + runner)
 
         self.assertIn("PKG_VERSION:=3.1.20260828", awg_package)
         self.assertIn("PKG_HASH:=24c656cfb80ff6855702710eaf2e3729fa710bf6bfdbbbdfba01984ccd17de95", awg_package)
-        self.assertIn("cmd/warp-awgctl", awg_package)
+        self.assertIn("warp-awgctl.c", awg_package)
+        self.assertIn("IdealBatchSize = 32", awg_memory_patch)
+        self.assertIn("GOMEMLIMIT=48MiB", init)
+        self.assertIn("WG_PROCESS_FOREGROUND=1", init)
         self.assertIn("PKG_VERSION:=0.16.0", scout_package)
         self.assertIn("PKG_HASH:=c21c777239856401f6529e4e2503d9f6ebd9071f78988fe86e35aaefc65a1c20", scout_package)
         self.assertIn("return mintWGAccount(ctx, client, existing)", scout_patch)
@@ -157,12 +234,12 @@ class PackageTests(unittest.TestCase):
 
     def test_awg_controller_does_not_expose_keys(self):
         text = AWG_CTL.read_text(encoding="utf-8")
-        self.assertIn('"last_handshake_time_sec": true', text)
-        self.assertIn('"rx_bytes": true', text)
-        self.assertNotIn('"private_key": true', text)
-        self.assertNotIn('"public_key": true', text)
+        self.assertIn('!strcmp(field, "last_handshake_time_sec")', text)
+        self.assertIn('!strcmp(field, "rx_bytes")', text)
+        self.assertNotIn('!strcmp(field, "private_key")', text)
+        self.assertNotIn('!strcmp(field, "public_key")', text)
         self.assertIn("key must be 32-byte base64", text)
-        self.assertIn("endpoint must contain a numeric IP address and port", text)
+        self.assertIn("endpoint must contain a numeric IPv4 address and port", text)
 
     def test_runtime_start_reports_the_failed_phase(self):
         manager = MANAGER.read_text(encoding="utf-8")
@@ -174,7 +251,7 @@ class PackageTests(unittest.TestCase):
             "data_plane_unavailable",
         ]:
             self.assertIn(f"RUNTIME_START_ERROR={error_code}", manager)
-        self.assertEqual(manager.count('emit_error "$RUNTIME_START_ERROR"'), 1)
+        self.assertEqual(manager.count('emit_error "$RUNTIME_START_ERROR"'), 2)
 
     def test_rpc_has_no_command_parameter(self):
         text = RPC.read_text(encoding="utf-8")
@@ -212,15 +289,16 @@ class PackageTests(unittest.TestCase):
         makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
         self.assertIn("LUCI_PKGARCH:=all", makefile)
         self.assertIn("LUCI_NAME:=luci-app-warp", makefile)
-        self.assertIn("warp-awg (>=3.1.20260828-r1)", makefile)
+        self.assertIn("warp-awg (>=3.1.20260828-r2)", makefile)
         self.assertIn("warp-warpscout (>=0.16.0-r1)", makefile)
+        self.assertIn("LUCI_DEPENDS:=+luci-base +curl +jsonfilter", makefile)
         for unwanted in ["+wireguard-tools", "+sing-box", "+kmod-wireguard", "+luci-proto-wireguard", "firewall4", "pbr"]:
             self.assertNotIn(unwanted, makefile)
 
     def test_installer_selects_supported_arm64_packages(self):
         installer = (ROOT / "install.sh").read_text(encoding="utf-8")
         self.assertIn("aarch64|aarch64_cortex-a53)", installer)
-        self.assertIn('AWG_PACKAGE="warp-awg-3.1.20260828-r1-$ARCH.apk"', installer)
+        self.assertIn('AWG_PACKAGE="warp-awg-3.1.20260828-r2-$ARCH.apk"', installer)
         self.assertIn('SCOUT_PACKAGE="warp-warpscout-0.16.0-r1-$ARCH.apk"', installer)
         self.assertIn("DISTRIB_ARCH", installer)
         self.assertIn("OPENWRT_ARCH", installer)

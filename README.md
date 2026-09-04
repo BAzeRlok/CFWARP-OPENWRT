@@ -53,9 +53,23 @@ curl -4 --interface warp --connect-timeout 10 --max-time 20 \
     grep -E '^(ip|colo|warp|gateway)='
 ```
 
-Ожидаемое значение: `warp=on`. Если три проверки подряд не проходят, watchdog
-сохраняет текущий рабочий конфиг, ищет другой endpoint и переключается только
-после успешной проверки кандидата.
+Ожидаемое значение: `warp=on`. После пяти неудачных проверок watchdog мягко
+перезапускает туннель с текущим endpoint. Новый endpoint ищется только по кнопке
+«Переподключить», чтобы фоновое восстановление не создавало скачков нагрузки.
+
+Последняя автоматическая попытка восстановления и доступная в тот момент память
+записываются в `/etc/warp/last_recovery`. Если роутер неожиданно перезагрузился,
+проверьте:
+
+```sh
+cat /etc/warp/last_recovery 2>/dev/null
+free -m
+logread | grep -Ei 'warp|oom|out of memory|killed process|watchdog|panic|thermal'
+dmesg | grep -Ei 'oom|out of memory|killed process|watchdog|panic|thermal'
+```
+
+`logread` обычно хранится в RAM и очищается при перезагрузке. Для точного разбора
+повторной перезагрузки заранее включите удалённый системный журнал OpenWrt.
 
 ## Удаление
 
@@ -83,7 +97,7 @@ apk del luci-i18n-warp-ru luci-app-warp warp-awg warp-warpscout
 ## Сборка
 
 Корневой каталог собирает LuCI-пакет. `warp-awg/` содержит OpenWrt-рецепт
-userspace AmneziaWG и закрытого UAPI-контроллера, `warp-warpscout/` — рецепт
+userspace AmneziaWG и минимального UAPI-контроллера, `warp-warpscout/` — рецепт
 регистратора и сканера endpoint. Статические проверки:
 
 ```sh

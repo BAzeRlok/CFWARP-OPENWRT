@@ -24,6 +24,7 @@ IFDOWN_BIN="${WARP_IFDOWN_BIN:-/sbin/ifdown}"
 SERVICE_INIT="${WARP_SERVICE_INIT:-/etc/init.d/warp}"
 WATCHDOG_INIT="${WARP_WATCHDOG_INIT:-/etc/init.d/warp-watchdog}"
 PING_BIN="${WARP_PING_BIN:-/bin/ping}"
+SCOUT_JOBS="${WARP_SCOUT_JOBS:-1}"
 
 lock_held=0
 temp_batch=
@@ -109,6 +110,14 @@ require_dependencies() {
 	[ -c /dev/net/tun ] || emit_error 'tun_unavailable'
 }
 
+require_runtime_dependencies() {
+	for path in "$UCI_BIN" "$UBUS_BIN" "$JSONFILTER_BIN" "$AWG_GO_BIN" \
+		"$AWG_CTL_BIN" "$IFUP_BIN" "$SERVICE_INIT" "$PING_BIN" /sbin/ip; do
+		[ -x "$path" ] || emit_error 'dependency_missing'
+	done
+	[ -c /dev/net/tun ] || emit_error 'tun_unavailable'
+}
+
 cfg_get() {
 	value=$($UCI_BIN -q get "warp.main.$1" 2>/dev/null || true)
 	[ -n "$value" ] && printf '%s\n' "$value" || printf '%s\n' "$2"
@@ -148,7 +157,7 @@ validate_settings() {
 	CFG_SNI=$(cfg_get sni ozon.ru)
 	CFG_EXCLUDE_COUNTRIES=$(cfg_get exclude_countries RU | tr '[:lower:]' '[:upper:]')
 	CFG_EXCLUDE_NODES=$(cfg_get exclude_nodes DME | tr '[:lower:]' '[:upper:]')
-	CFG_SCAN_SAMPLE=$(cfg_get scan_sample 5)
+	CFG_SCAN_SAMPLE=$(cfg_get scan_sample 3)
 	CFG_ACTUAL=$(cfg_get actual_interface '')
 	CFG_STORED_BACKEND=$(cfg_get actual_backend '')
 	CFG_BACKEND=$CFG_STORED_BACKEND
@@ -161,6 +170,7 @@ validate_settings() {
 	valid_country_list "$CFG_EXCLUDE_COUNTRIES" || emit_error 'invalid_excluded_countries'
 	valid_node_list "$CFG_EXCLUDE_NODES" || emit_error 'invalid_excluded_nodes'
 	valid_uint_range "$CFG_SCAN_SAMPLE" 1 256 || emit_error 'invalid_scan_sample'
+	valid_uint_range "$SCOUT_JOBS" 1 4 || emit_error 'invalid_scan_workers'
 	[ -z "$CFG_ACTUAL" ] || valid_uci_name "$CFG_ACTUAL" || emit_error 'invalid_managed_interface'
 	[ -z "$CFG_STORED_BACKEND" ] || printf '%s' "$CFG_STORED_BACKEND" | grep -Eq '^[A-Za-z0-9_-]{1,32}$' || emit_error 'invalid_backend'
 	case "$CFG_BACKEND" in ''|amneziawg) ;; *) CFG_BACKEND= ;; esac
@@ -225,11 +235,11 @@ ensure_account() {
 	temp_account="$STATE_DIR/.awg-account.$$"
 	: >"$BACKEND_LOG" || emit_error 'state_write_failed'
 	chmod 600 "$BACKEND_LOG" || emit_error 'state_write_failed'
-	if ! NO_COLOR=1 "$SCOUT_BIN" register --plain --relay none \
+	if ! GOMAXPROCS=1 NO_COLOR=1 "$SCOUT_BIN" register --plain --relay none \
 		--account "$temp_account" --gen-i1 quic --i1-sni "$CFG_SNI" \
 		>"$BACKEND_LOG" 2>&1; then
 		rm -f -- "$temp_account"
-		if ! NO_COLOR=1 "$SCOUT_BIN" register --plain --relay none \
+		if ! GOMAXPROCS=1 NO_COLOR=1 "$SCOUT_BIN" register --plain --relay none \
 			--account "$temp_account" >>"$BACKEND_LOG" 2>&1; then
 			emit_error 'awg_registration_failed'
 		fi
@@ -325,11 +335,12 @@ scan_candidate() {
 	chmod 600 "$BACKEND_LOG" || emit_error 'state_write_failed'
 	set -- scan --plain --account "$ACCOUNT_FILE" --proto awg \
 		--gen-i1 quic --i1-sni "$CFG_SNI" --sample "$CFG_SCAN_SAMPLE" \
-		--tun-ping-count 10 --no-report --conf "$temp_full_config" \
+		--tunnel-jobs "$SCOUT_JOBS" --tun-ping-count 10 \
+		--no-report --conf "$temp_full_config" \
 		--table-off --no-dns --mtu "$CFG_MTU"
 	[ -z "$CFG_EXCLUDE_COUNTRIES" ] || set -- "$@" --exclude-country "$CFG_EXCLUDE_COUNTRIES"
 	[ -z "$CFG_EXCLUDE_NODES" ] || set -- "$@" --exclude-node "$CFG_EXCLUDE_NODES"
-	if ! NO_COLOR=1 "$SCOUT_BIN" "$@" >"$BACKEND_LOG" 2>&1; then
+	if ! GOMAXPROCS=1 NO_COLOR=1 "$SCOUT_BIN" "$@" >"$BACKEND_LOG" 2>&1; then
 		emit_error 'endpoint_scan_failed'
 	fi
 	[ -s "$temp_full_config" ] || emit_error 'endpoint_scan_failed'
@@ -480,12 +491,6 @@ apply_configuration() {
 		restore_actual_state || emit_error 'rollback_failed'
 		emit_error 'settings_commit_failed'
 	fi
-	if ! $UBUS_BIN call network reload '{}' >/dev/null 2>&1; then
-		restore_snapshot || emit_error 'rollback_failed'
-		restore_actual_state || emit_error 'rollback_failed'
-		$UBUS_BIN call network reload '{}' >/dev/null 2>&1 || true
-		emit_error 'network_reload_failed'
-	fi
 }
 
 install_candidate_config() {
@@ -551,6 +556,18 @@ runtime_restart_service() {
 	rm -f -- "$FORCE_START_FILE"
 }
 
+recent_handshake() {
+	interface_name=$1
+	maximum_age=$2
+	handshake=$($AWG_CTL_BIN get "$interface_name" last_handshake_time_sec 2>/dev/null || true)
+	now=$(date +%s 2>/dev/null || printf '0')
+	case "$handshake" in ''|*[!0-9]*) return 1 ;; esac
+	case "$now" in ''|*[!0-9]*|0) return 1 ;; esac
+	[ "$handshake" -gt 0 ] || return 1
+	age=$((now - handshake))
+	[ "$age" -ge 0 ] && [ "$age" -le "$maximum_age" ]
+}
+
 runtime_start() {
 	RUNTIME_START_ERROR=interface_up_failed
 	rm -f -- "$DISABLED_FILE"
@@ -579,8 +596,13 @@ runtime_start() {
 		return 1
 	fi
 	wait_count=0
-	while [ "$wait_count" -lt 10 ]; do
-		if "$PING_BIN" -4 -I "$ACTUAL_INTERFACE" -c 1 -W 2 1.1.1.1 >/dev/null 2>&1; then
+	while [ "$wait_count" -lt 15 ]; do
+		# The selected endpoint has already passed WARPSCOUT's in-tunnel data
+		# check. Some TUN implementations return a non-zero ping exit status
+		# after receiving a reply, so a fresh authenticated handshake is also a
+		# valid readiness signal.
+		if "$PING_BIN" -4 -I "$ACTUAL_INTERFACE" -c 1 -W 2 1.1.1.1 >/dev/null 2>&1 ||
+			recent_handshake "$ACTUAL_INTERFACE" 60; then
 			[ "$START_WATCHDOG" -eq 0 ] || "$WATCHDOG_INIT" restart >/dev/null 2>&1 || true
 			return 0
 		fi
@@ -680,7 +702,19 @@ do_reconnect() {
 
 do_recover() {
 	acquire_lock
-	connect_tunnel 'recovered' 1 1
+	STOP_WATCHDOG=0
+	START_WATCHDOG=0
+	require_runtime_dependencies
+	validate_settings
+	account_valid || emit_error 'invalid_awg_account'
+	awg_config_valid || emit_error 'invalid_awg_config'
+	[ -n "$CFG_ACTUAL" ] && interface_owned "$CFG_ACTUAL" || emit_error 'managed_interface_missing'
+	ACTUAL_INTERFACE=$CFG_ACTUAL
+	runtime_stop
+	if ! runtime_start; then
+		emit_error "$RUNTIME_START_ERROR"
+	fi
+	emit_success 'recovered' "$ACTUAL_INTERFACE"
 }
 
 do_disable() {
@@ -713,7 +747,8 @@ do_unregister() {
 	remove_managed_network "$CFG_ACTUAL"
 	clear_actual_state
 	$UBUS_BIN call network reload '{}' >/dev/null 2>&1 || emit_error 'network_reload_failed'
-	rm -f -- "$ACCOUNT_FILE" "$AWG_CONFIG" "$BACKEND_LOG" "$DISABLED_FILE" "$LAST_ERROR"
+	rm -f -- "$ACCOUNT_FILE" "$AWG_CONFIG" "$BACKEND_LOG" "$DISABLED_FILE" "$LAST_ERROR" \
+		"$STATE_DIR/last_recovery"
 	emit_success 'unregistered' ''
 }
 

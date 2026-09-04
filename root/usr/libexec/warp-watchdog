@@ -10,9 +10,12 @@ AWG_CTL_BIN="${WARP_AWG_CTL_BIN:-/usr/libexec/warp-awgctl}"
 MANAGER="${WARP_MANAGER_BIN:-/usr/libexec/warp-manager}"
 PING_BIN="${WARP_PING_BIN:-/bin/ping}"
 INTERVAL="${WARP_WATCHDOG_INTERVAL:-30}"
-MAX_FAILURES="${WARP_WATCHDOG_FAILURES:-3}"
+MAX_FAILURES="${WARP_WATCHDOG_FAILURES:-5}"
+RECOVERY_PAUSE="${WARP_WATCHDOG_RECOVERY_PAUSE:-120}"
+LAST_RECOVERY="$STATE_DIR/last_recovery"
 
 failures=0
+last_rx=0
 
 log() {
 	logger -t warp-watchdog -- "$1"
@@ -21,6 +24,7 @@ log() {
 while sleep "$INTERVAL"; do
 	[ ! -e "$DISABLED_FILE" ] || {
 		failures=0
+		last_rx=0
 		continue
 	}
 	[ ! -d "$LOCK_DIR" ] || continue
@@ -29,35 +33,52 @@ while sleep "$INTERVAL"; do
 	backend=$($UCI_BIN -q get warp.main.actual_backend 2>/dev/null || true)
 	if ! printf '%s' "$iface" | grep -Eq '^[A-Za-z_][A-Za-z0-9_]{0,14}$'; then
 		failures=0
+		last_rx=0
 		continue
 	fi
 	[ "$backend" = amneziawg ] || {
 		failures=0
+		last_rx=0
 		continue
 	}
-	healthy=0
+	handshake_ok=0
+	rx_before=0
 	if [ -r "/sys/class/net/$iface/tun_flags" ]; then
 		handshake=$($AWG_CTL_BIN get "$iface" last_handshake_time_sec 2>/dev/null || true)
+		rx_before=$($AWG_CTL_BIN get "$iface" rx_bytes 2>/dev/null || printf '0')
 		now=$(date +%s 2>/dev/null || printf '0')
-		case "$handshake:$now" in
-			*[!0-9:]*) ;;
-			0:*|*:0) ;;
-			*)
-				age=$((now - handshake))
-				[ "$age" -ge 0 ] && [ "$age" -le 180 ] && healthy=1 || true
-				;;
-		esac
+		case "$rx_before" in ''|*[!0-9]*) rx_before=0 ;; esac
+		case "$handshake" in ''|*[!0-9]*) handshake=0 ;; esac
+		case "$now" in ''|*[!0-9]*) now=0 ;; esac
+		if [ "$handshake" -gt 0 ] && [ "$now" -gt 0 ]; then
+			age=$((now - handshake))
+			[ "$age" -ge 0 ] && [ "$age" -le 300 ] && handshake_ok=1 || true
+		fi
 	fi
-	if [ "$healthy" -eq 1 ] && "$PING_BIN" -4 -I "$iface" -c 1 -W 3 1.1.1.1 >/dev/null 2>&1; then
+	ping_ok=0
+	"$PING_BIN" -4 -I "$iface" -c 2 -W 2 1.1.1.1 >/dev/null 2>&1 && ping_ok=1 || true
+	rx_after=$($AWG_CTL_BIN get "$iface" rx_bytes 2>/dev/null || printf '0')
+	case "$rx_after" in ''|*[!0-9]*) rx_after=0 ;; esac
+	traffic_ok=0
+	[ "$rx_after" -gt "$rx_before" ] 2>/dev/null && traffic_ok=1 || true
+	[ "$rx_after" -gt "$last_rx" ] 2>/dev/null && traffic_ok=1 || true
+	last_rx=$rx_after
+	if [ "$handshake_ok" -eq 1 ] && { [ "$ping_ok" -eq 1 ] || [ "$traffic_ok" -eq 1 ]; }; then
 		failures=0
 		continue
 	fi
 
 	failures=$((failures + 1))
 	[ "$failures" -ge "$MAX_FAILURES" ] || continue
-	log "AWG data plane failed $failures checks; selecting another endpoint"
+	mem_available=$(awk '/^MemAvailable:/ { print $2; exit }' /proc/meminfo 2>/dev/null || printf 'unknown')
+	load_average=$(sed -n '1{s/ .*//;p}' /proc/loadavg 2>/dev/null || printf 'unknown')
+	stamp=$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date +%s)
+	printf '%s failures=%s mem_available_kb=%s load=%s\n' \
+		"$stamp" "$failures" "$mem_available" "$load_average" >"$LAST_RECOVERY" 2>/dev/null || true
+	chmod 600 "$LAST_RECOVERY" 2>/dev/null || true
+	log "AWG data plane failed $failures checks; restarting the current endpoint (MemAvailable=${mem_available}kB load=${load_average})"
 	result=$($MANAGER recover 2>&1 || true)
 	log "$result"
 	failures=0
-	sleep 90
+	sleep "$RECOVERY_PAUSE"
 done

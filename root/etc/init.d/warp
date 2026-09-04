@@ -28,6 +28,9 @@ start_service() {
 	procd_set_param file "$STATE_DIR/awg-account.json" "$STATE_DIR/awg.conf"
 	procd_set_param stdout 1
 	procd_set_param stderr 1
+	# Keep the userspace tunnel from competing for all router memory under a
+	# burst. This is a soft Go heap limit; packet forwarding remains continuous.
+	procd_set_param env GOMEMLIMIT=48MiB WG_PROCESS_FOREGROUND=1
 	procd_set_param term_timeout 10
 	procd_set_param respawn 3600 5 5
 	procd_close_instance

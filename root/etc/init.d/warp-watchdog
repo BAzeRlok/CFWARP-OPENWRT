@@ -6,6 +6,12 @@ STOP=03
 
 start_service() {
 	[ -x /usr/libexec/warp-watchdog ] || return 1
+	[ ! -e /etc/warp/disabled ] || return 0
+	[ -s /etc/warp/awg-account.json ] || return 0
+	[ -s /etc/warp/awg.conf ] || return 0
+	config_load warp
+	config_get backend main actual_backend ''
+	[ "$backend" = amneziawg ] || return 0
 
 	procd_open_instance watchdog
 	procd_set_param command /usr/libexec/warp-watchdog
