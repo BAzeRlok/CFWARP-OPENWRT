@@ -191,7 +191,8 @@ PersistentKeepalive = 25
         self.assertIn('SCOUT_JOBS="${WARP_SCOUT_JOBS:-2}"', manager)
         self.assertIn("SCOUT_FAST_TARGETS='162.159.192.0/24,188.114.96.0/24,188.114.97.0/24'", manager)
         self.assertIn("SCOUT_PING_TARGET='8.8.8.8'", manager)
-        self.assertIn('if [ "$INITIAL_SCAN" -eq 1 ] && [ "$CFG_SCAN_SAMPLE" -gt 1 ]', manager)
+        self.assertIn('if [ "$CFG_SCAN_SAMPLE" -gt 1 ]', manager)
+        self.assertNotIn("INITIAL_SCAN", manager)
         self.assertIn('run_endpoint_scan 1 "$SCOUT_FAST_TARGETS"', manager)
         self.assertIn('run_endpoint_scan "$CFG_SCAN_SAMPLE"', manager)
         self.assertIn('GOMAXPROCS=1 NO_COLOR=1 "$SCOUT_BIN"', manager)
@@ -308,7 +309,7 @@ PersistentKeepalive = 25
     def test_installer_selects_supported_arm64_packages(self):
         installer = (ROOT / "install.sh").read_text(encoding="utf-8")
         self.assertIn("aarch64|aarch64_cortex-a53)", installer)
-        self.assertIn('LUCI_PACKAGE="luci-app-warp-3.0.0-r5.apk"', installer)
+        self.assertIn('LUCI_PACKAGE="luci-app-warp-3.0.0-r6.apk"', installer)
         self.assertIn('AWG_PACKAGE="warp-awg-3.1.20260828-r3-$ARCH.apk"', installer)
         self.assertIn('SCOUT_PACKAGE="warp-warpscout-0.16.0-r1-$ARCH.apk"', installer)
         self.assertIn('result=$(/usr/libexec/warp-manager enable)', installer)

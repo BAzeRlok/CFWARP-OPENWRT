@@ -41,7 +41,6 @@ config_swapped=0
 STOP_WATCHDOG=1
 START_WATCHDOG=1
 RUNTIME_START_ERROR=interface_up_failed
-INITIAL_SCAN=0
 
 cleanup() {
 	[ -z "$temp_batch" ] || rm -f -- "$temp_batch"
@@ -359,8 +358,8 @@ accept_scanned_candidate() {
 
 scan_candidate() {
 	temp_full_config="$STATE_DIR/.warpscout-conf.$$"
-	if [ "$INITIAL_SCAN" -eq 1 ] && [ "$CFG_SCAN_SAMPLE" -gt 1 ]; then
-		backend_note "Fast initial endpoint scan: core pools, sample 1, workers $SCOUT_JOBS, ping target $SCOUT_PING_TARGET"
+	if [ "$CFG_SCAN_SAMPLE" -gt 1 ]; then
+		backend_note "Fast endpoint scan: core pools, sample 1, workers $SCOUT_JOBS, ping target $SCOUT_PING_TARGET"
 		if run_endpoint_scan 1 "$SCOUT_FAST_TARGETS"; then
 			accept_scanned_candidate
 			return
@@ -695,7 +694,6 @@ connect_tunnel() {
 	chmod 600 "$BACKEND_LOG" || emit_error 'state_write_failed'
 	check_system_time
 	if ! account_valid || ! awg_config_valid; then
-		INITIAL_SCAN=1
 		rescan=1
 	fi
 	ensure_account
