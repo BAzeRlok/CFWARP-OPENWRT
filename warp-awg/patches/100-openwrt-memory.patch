@@ -1,15 +1,14 @@
 --- a/conn/conn.go
 +++ b/conn/conn.go
-@@ -16,7 +16,11 @@ import (
+@@ -16,7 +16,10 @@ import (
  )
  
  const (
 -	IdealBatchSize = 128 // maximum number of packets handled per read and write
 +	// A batch of 128 makes each Linux receive routine retain about 8 MiB of
-+	// 64 KiB message buffers. The OpenWrt service handles one peer on small
-+	// routers, where a batch of 32 keeps batching while cutting that retained
-+	// memory by four.
-+	IdealBatchSize = 32 // maximum number of packets handled per read and write
++	// 64 KiB message buffers. UDP GRO can coalesce up to 64 datagrams, so 64
++	// is the safe minimum and halves the retained receive-buffer memory.
++	IdealBatchSize = 64 // maximum number of packets handled per read and write
  )
  
  // A ReceiveFunc receives at least one packet from the network and writes them

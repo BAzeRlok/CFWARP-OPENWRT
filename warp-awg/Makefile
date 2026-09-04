@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=warp-awg
 PKG_VERSION:=3.1.20260828
-PKG_RELEASE:=2
+PKG_RELEASE:=3
 
 PKG_SOURCE:=amneziawg-go-$(PKG_VERSION).tar.gz
 PKG_SOURCE_URL:=https://codeload.github.com/amnezia-vpn/amneziawg-go/tar.gz/refs/tags/v$(PKG_VERSION)?

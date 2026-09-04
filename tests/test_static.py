@@ -208,7 +208,11 @@ PersistentKeepalive = 25
         self.assertIn("PKG_VERSION:=3.1.20260828", awg_package)
         self.assertIn("PKG_HASH:=24c656cfb80ff6855702710eaf2e3729fa710bf6bfdbbbdfba01984ccd17de95", awg_package)
         self.assertIn("warp-awgctl.c", awg_package)
-        self.assertIn("IdealBatchSize = 32", awg_memory_patch)
+        batch_size = re.search(r"^\+\s*IdealBatchSize\s*=\s*(\d+)", awg_memory_patch, re.M)
+        self.assertIsNotNone(batch_size)
+        # The Linux UDP GRO path reserves one slot per group of 64 datagrams.
+        # A smaller batch produces an empty ReadBatch slice and panics.
+        self.assertGreaterEqual(int(batch_size.group(1)), 64)
         self.assertIn("GOMEMLIMIT=48MiB", init)
         self.assertIn("WG_PROCESS_FOREGROUND=1", init)
         self.assertIn("PKG_VERSION:=0.16.0", scout_package)
@@ -289,7 +293,7 @@ PersistentKeepalive = 25
         makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
         self.assertIn("LUCI_PKGARCH:=all", makefile)
         self.assertIn("LUCI_NAME:=luci-app-warp", makefile)
-        self.assertIn("warp-awg (>=3.1.20260828-r2)", makefile)
+        self.assertIn("warp-awg (>=3.1.20260828-r3)", makefile)
         self.assertIn("warp-warpscout (>=0.16.0-r1)", makefile)
         self.assertIn("LUCI_DEPENDS:=+luci-base +curl +jsonfilter", makefile)
         for unwanted in ["+wireguard-tools", "+sing-box", "+kmod-wireguard", "+luci-proto-wireguard", "firewall4", "pbr"]:
@@ -298,7 +302,7 @@ PersistentKeepalive = 25
     def test_installer_selects_supported_arm64_packages(self):
         installer = (ROOT / "install.sh").read_text(encoding="utf-8")
         self.assertIn("aarch64|aarch64_cortex-a53)", installer)
-        self.assertIn('AWG_PACKAGE="warp-awg-3.1.20260828-r2-$ARCH.apk"', installer)
+        self.assertIn('AWG_PACKAGE="warp-awg-3.1.20260828-r3-$ARCH.apk"', installer)
         self.assertIn('SCOUT_PACKAGE="warp-warpscout-0.16.0-r1-$ARCH.apk"', installer)
         self.assertIn("DISTRIB_ARCH", installer)
         self.assertIn("OPENWRT_ARCH", installer)

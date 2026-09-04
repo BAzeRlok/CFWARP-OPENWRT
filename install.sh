@@ -6,7 +6,7 @@ umask 077
 REPOSITORY="BAzeRlok/CFWARP-OPENWRT"
 RELEASE_TAG="v3.0.0"
 RELEASE_URL="https://github.com/$REPOSITORY/releases/download/$RELEASE_TAG"
-LUCI_PACKAGE="luci-app-warp-3.0.0-r2.apk"
+LUCI_PACKAGE="luci-app-warp-3.0.0-r3.apk"
 I18N_PACKAGE="luci-i18n-warp-ru-3.0.0.apk"
 MASKING_SNI="${WARP_SNI:-ozon.ru}"
 EXCLUDE_COUNTRIES="${WARP_EXCLUDE_COUNTRIES:-RU}"
@@ -49,7 +49,7 @@ fi
 [ -n "$ARCH" ] || ARCH=$(apk --print-arch 2>/dev/null | sed -n '1p')
 case "$ARCH" in
 	aarch64|aarch64_cortex-a53)
-		AWG_PACKAGE="warp-awg-3.1.20260828-r2-$ARCH.apk"
+		AWG_PACKAGE="warp-awg-3.1.20260828-r3-$ARCH.apk"
 		SCOUT_PACKAGE="warp-warpscout-0.16.0-r1-$ARCH.apk"
 		;;
 	*)
