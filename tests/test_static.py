@@ -48,6 +48,7 @@ class PackageTests(unittest.TestCase):
             ROOT / "root/etc/init.d/warp",
             ROOT / "root/etc/init.d/warp-watchdog",
             ROOT / "install.sh",
+            ROOT / "tools/test-direct-regions.sh",
             ROOT / "tests/router-integration.sh",
             ROOT / "tests/run.sh",
         ]:

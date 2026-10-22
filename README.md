@@ -85,6 +85,28 @@ curl -4 --interface warp --connect-timeout 10 --max-time 20 \
 
 Ожидаемое значение — `warp=on`.
 
+Проверить, доступны ли напрямую через WAN ближайшие зарубежные узлы Cloudflare,
+не меняя текущую конфигурацию WARP:
+
+```sh
+wget -qO /tmp/warp-region-test.sh \
+    https://raw.githubusercontent.com/BAzeRlok/CFWARP-OPENWRT/main/tools/test-direct-regions.sh
+sh /tmp/warp-region-test.sh
+```
+
+Скрипт временно останавливает работающий WARP и проверяет одной выборкой
+ближайшие узлы Северной, Центральной и Западной Европы строго через WAN, после
+чего восстанавливает исходный туннель. В список входят, среди прочих, `FI/HEL`,
+`SE/ARN`, `EE/TLL`, `LV/RIX`, `LT/VNO`, `PL/WAW`, `DE/FRA` и `NL/AMS`. UCI и
+сохранённый endpoint не изменяются. Для более глубокой проверки:
+
+```sh
+WARP_TEST_SAMPLE=24 sh /tmp/warp-region-test.sh
+```
+
+Иностранный `NODE` ещё не означает иностранный публичный адрес: окончательный
+результат определяется столбцом `SEEN AS` в отчёте.
+
 Команды управления:
 
 ```sh
