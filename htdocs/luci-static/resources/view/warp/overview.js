@@ -19,6 +19,7 @@ const callRegister = rpc.declare({
 const callEnable = rpc.declare({ object: 'luci.warp', method: 'enable' });
 const callDisable = rpc.declare({ object: 'luci.warp', method: 'disable' });
 const callReconnect = rpc.declare({ object: 'luci.warp', method: 'reconnect' });
+const callRescan = rpc.declare({ object: 'luci.warp', method: 'rescan' });
 const callUnregister = rpc.declare({ object: 'luci.warp', method: 'unregister' });
 
 const stateLabels = {
@@ -50,14 +51,23 @@ const errorLabels = {
 	invalid_awg_config: _('The AmneziaWG configuration is missing or invalid.'),
 	awg_registration_failed: _('WARP registration failed. Check /etc/warp/backend.log.'),
 	endpoint_scan_failed: _('No suitable WARP endpoint was found. Check /etc/warp/backend.log.'),
+	scout_download_failed: _('The temporary endpoint scanner could not be downloaded.'),
+	scout_integrity_failed: _('The temporary endpoint scanner failed its integrity check.'),
+	scout_extract_failed: _('The temporary endpoint scanner could not be unpacked.'),
+	unsupported_architecture: _('This router architecture is not supported.'),
 	invalid_backend: _('The stored backend name is invalid.'),
 	invalid_auto_start: _('The automatic start setting is invalid.'),
 	invalid_interface_name: _('The preferred interface name is invalid.'),
 	invalid_mtu: _('The configured MTU is invalid.'),
 	invalid_keepalive: _('The configured keepalive value is invalid.'),
 	invalid_sni: _('The masking hostname is invalid.'),
-	invalid_excluded_countries: _('The excluded country list is invalid.'),
+	invalid_node_countries: _('The required Cloudflare node country list is invalid.'),
+	invalid_nodes: _('The required Cloudflare node list is invalid.'),
+	invalid_excluded_node_countries: _('The excluded Cloudflare node country list is invalid.'),
 	invalid_excluded_nodes: _('The excluded endpoint list is invalid.'),
+	invalid_upstream_interface: _('The upstream interface name is invalid.'),
+	upstream_interface_unavailable: _('The upstream interface is unavailable.'),
+	upstream_interface_loop: _('The upstream interface would create a routing loop.'),
 	invalid_scan_sample: _('The endpoint scan size is invalid.'),
 	no_safe_interface_name: _('No safe interface name is available.'),
 	managed_interface_missing: _('The managed interface is missing.'),
@@ -172,6 +182,12 @@ return view.extend({
 		];
 		if (status.endpoint)
 			rows.push(_('Endpoint'), status.endpoint);
+		if (status.node)
+			rows.push(_('Observed Cloudflare node'), status.node);
+		if (status.seen_as)
+			rows.push(_('Observed exit country'), status.seen_as);
+		if (status.upstream_interface)
+			rows.push(_('Upstream interface'), status.upstream_interface);
 		if (status.error_code)
 			rows.push(_('Last error'), errorLabels[status.error_code] || status.error_code);
 
@@ -209,6 +225,10 @@ return view.extend({
 				'click': function() { return self.runAction(_('Reconnecting WARP'), callReconnect()); }
 			}, _('Reconnect')));
 			buttons.push(' ', E('button', {
+				'class': 'btn cbi-button-neutral',
+				'click': function() { return self.runAction(_('Searching for another endpoint'), callRescan()); }
+			}, _('Find another endpoint')));
+			buttons.push(' ', E('button', {
 				'class': 'btn cbi-button-negative',
 				'click': function() { return self.confirmUnregister(); }
 			}, _('Remove registration')));
@@ -218,7 +238,7 @@ return view.extend({
 
 	render: function(data) {
 		const status = data[0] || {};
-		const map = new form.Map('warp', _('Settings'), _('Creates a separate WARP interface without changing routes, DNS or firewall.'));
+		const map = new form.Map('warp', _('Settings'), _('Creates a separate WARP interface without changing DNS or firewall. An endpoint route is added only when an upstream interface is selected.'));
 		const section = map.section(form.NamedSection, 'main', 'warp');
 
 		let option = section.option(form.Flag, 'auto_start', _('Start automatically'));
@@ -253,20 +273,56 @@ return view.extend({
 			return true;
 		};
 
-		option = section.option(form.Value, 'exclude_countries', _('Exclude exit countries'));
+		option = section.option(form.Value, 'node_countries', _('Required Cloudflare node countries'));
+		option.placeholder = 'NL,DE';
+		option.optional = true;
+		option.description = _('Optional ISO country codes for Cloudflare entry nodes. This does not guarantee the public exit country.');
+		option.validate = function(sectionId, value) {
+			return !value || /^[A-Za-z]{2}(,[A-Za-z]{2})*$/.test(value) ? true : _('Use comma-separated two-letter country codes, for example NL,DE.');
+		};
+
+		option = section.option(form.Value, 'nodes', _('Required Cloudflare nodes'));
+		option.placeholder = 'AMS,FRA';
+		option.optional = true;
+		option.description = _('Optional three-letter Cloudflare node codes.');
+		option.validate = function(sectionId, value) {
+			return !value || /^[A-Za-z]{3}(,[A-Za-z]{3})*$/.test(value) ? true : _('Use comma-separated three-letter node codes, for example AMS,FRA.');
+		};
+
+		option = section.option(form.Value, 'exclude_node_countries', _('Exclude Cloudflare node countries'));
 		option.placeholder = 'RU';
 		option.default = 'RU';
 		option.optional = true;
-		option.description = _('Comma-separated ISO country codes. The default avoids Russian WARP exits.');
+		option.description = _('Comma-separated ISO country codes for Cloudflare entry nodes.');
 		option.validate = function(sectionId, value) {
 			return !value || /^[A-Za-z]{2}(,[A-Za-z]{2})*$/.test(value) ? true : _('Use comma-separated two-letter country codes, for example RU,BY.');
+		};
+
+		option = section.option(form.Value, 'exclude_nodes', _('Exclude Cloudflare nodes'));
+		option.placeholder = 'DME';
+		option.default = 'DME';
+		option.optional = true;
+		option.validate = function(sectionId, value) {
+			return !value || /^[A-Za-z]{3}(,[A-Za-z]{3})*$/.test(value) ? true : _('Use comma-separated three-letter node codes, for example DME,LED.');
+		};
+
+		option = section.option(form.Value, 'upstream_interface', _('Upstream interface'));
+		option.placeholder = 'foreign_awg';
+		option.optional = true;
+		option.description = _('Optional existing foreign tunnel used only to reach the WARP endpoint. Leave empty for the normal WAN path.');
+		option.validate = function(sectionId, value) {
+			if (!value)
+				return true;
+			if (!/^[A-Za-z_][A-Za-z0-9_]{0,14}$/.test(value))
+				return _('Use the logical OpenWrt interface name, up to 15 letters, digits or underscores.');
+			return value === uci.get('warp', 'main', 'interface') ? _('The upstream interface cannot be the WARP interface.') : true;
 		};
 
 		return map.render().then(L.bind(function(formNode) {
 			const content = [
 				E('h2', {}, _('WARP')),
 				E('div', { 'class': 'cbi-section' }, [
-					E('p', {}, _('Traffic uses WAN until you select this interface in your routing configuration. Reconnect scans for a new verified endpoint.')),
+					E('p', {}, _('Traffic uses the normal route until you select this interface in your routing configuration. Reconnect keeps the current endpoint; endpoint search is a separate action.')),
 					this.renderStatus(status),
 					this.renderActions(status)
 				])

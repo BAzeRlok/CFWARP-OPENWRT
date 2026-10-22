@@ -13,6 +13,7 @@ function run(action) {
 		enable: true,
 		disable: true,
 		reconnect: true,
+		rescan: true,
 		unregister: true,
 	};
 
@@ -63,6 +64,11 @@ const methods = {
 	reconnect: {
 		call: function() {
 			return run('reconnect');
+		}
+	},
+	rescan: {
+		call: function() {
+			return run('rescan');
 		}
 	},
 	unregister: {

@@ -140,7 +140,7 @@ PersistentKeepalive = 25
         actions = re.findall(r'^\s*([a-z]+)\)\s+do_', dispatch.group("body"), re.M)
         self.assertEqual(
             actions,
-            ["register", "enable", "disable", "reconnect", "status", "unregister", "recover"],
+            ["register", "enable", "disable", "reconnect", "rescan", "status", "unregister", "recover"],
         )
         rpc = RPC.read_text(encoding="utf-8")
         self.assertNotIn("recover: true", rpc)
@@ -156,7 +156,11 @@ PersistentKeepalive = 25
         ]
         for value in required:
             self.assertIn(value, manager)
-        self.assertNotRegex(manager + runner, r"\bip\s+(route|rule)\s+(add|replace|del)")
+        self.assertNotRegex(manager, r"\bip\s+(route|rule)\s+(add|replace|del)")
+        self.assertNotRegex(runner, r"\bip\s+rule\s+(add|replace|del)")
+        self.assertIn('route replace "$route_endpoint/32"', runner)
+        self.assertIn('route del "$route_endpoint/32"', runner)
+        self.assertIn("metric 42760", runner)
         self.assertNotIn("/etc/config/firewall", manager + runner)
         self.assertNotRegex(manager, r"set (dhcp|firewall)\.")
 
@@ -184,7 +188,10 @@ PersistentKeepalive = 25
         scout_package = (ROOT / "warp-warpscout/Makefile").read_text(encoding="utf-8")
         scout_patch = (ROOT / "warp-warpscout/patches/100-awg-only.patch").read_text(encoding="utf-8")
 
-        self.assertIn('SCOUT_BIN="${WARP_SCOUT_BIN:-/usr/libexec/warp-warpscout}"', manager)
+        self.assertIn('SCOUT_BIN="${WARP_SCOUT_BIN:-}"', manager)
+        self.assertIn("ensure_scout()", manager)
+        self.assertIn("scout_integrity_failed", manager)
+        self.assertIn("warp-warpscout-$SCOUT_VERSION-$architecture.apk", manager)
         self.assertIn("--proto awg", manager)
         self.assertIn("--gen-i1 quic", manager)
         self.assertIn('--tunnel-jobs "$SCOUT_JOBS"', manager)
@@ -199,11 +206,17 @@ PersistentKeepalive = 25
         self.assertIn("--tun-ping-count 10", manager)
         self.assertIn('--ping-target "$SCOUT_PING_TARGET"', manager)
         self.assertIn("--exclude-country", manager)
+        self.assertIn('--country "$CFG_NODE_COUNTRIES"', manager)
+        self.assertIn('--node "$CFG_NODES"', manager)
+        self.assertIn('--interface "$UPSTREAM_DEVICE"', manager)
+        self.assertIn("connect_tunnel 'reconnected' 0 0", manager)
+        self.assertIn("connect_tunnel 'rescanned' 1 0", manager)
         self.assertIn("set warp.main.actual_backend='amneziawg'", manager)
         self.assertIn("/usr/libexec/warp-awg-runner", init)
         self.assertIn("/usr/libexec/warp-amneziawg-go", runner)
         self.assertIn("/usr/libexec/warp-awgctl", runner)
         self.assertIn('address replace "$ipv4/32"', runner)
+        self.assertIn("install_upstream_route", runner)
         self.assertIn("restarting the current endpoint", watchdog)
         self.assertIn("$MANAGER recover", watchdog)
         self.assertIn('MAX_FAILURES="${WARP_WATCHDOG_FAILURES:-5}"', watchdog)
@@ -301,7 +314,7 @@ PersistentKeepalive = 25
         self.assertIn("LUCI_PKGARCH:=all", makefile)
         self.assertIn("LUCI_NAME:=luci-app-warp", makefile)
         self.assertIn("warp-awg (>=3.1.20260828-r3)", makefile)
-        self.assertIn("warp-warpscout (>=0.16.0-r1)", makefile)
+        self.assertNotIn("warp-warpscout (>=", makefile)
         self.assertIn("LUCI_DEPENDS:=+luci-base +curl +jsonfilter", makefile)
         for unwanted in ["+wireguard-tools", "+sing-box", "+kmod-wireguard", "+luci-proto-wireguard", "firewall4", "pbr"]:
             self.assertNotIn(unwanted, makefile)
@@ -309,14 +322,30 @@ PersistentKeepalive = 25
     def test_installer_selects_supported_arm64_packages(self):
         installer = (ROOT / "install.sh").read_text(encoding="utf-8")
         self.assertIn("aarch64|aarch64_cortex-a53)", installer)
-        self.assertIn('LUCI_PACKAGE="luci-app-warp-3.0.0-r6.apk"', installer)
+        self.assertIn('LUCI_PACKAGE="luci-app-warp-4.0.0-r1.apk"', installer)
         self.assertIn('AWG_PACKAGE="warp-awg-3.1.20260828-r3-$ARCH.apk"', installer)
-        self.assertIn('SCOUT_PACKAGE="warp-warpscout-0.16.0-r1-$ARCH.apk"', installer)
+        self.assertNotIn('SCOUT_PACKAGE=', installer)
+        self.assertIn("apk del warp-warpscout", installer)
         self.assertIn('result=$(/usr/libexec/warp-manager enable)', installer)
         self.assertIn("DISTRIB_ARCH", installer)
         self.assertIn("OPENWRT_ARCH", installer)
-        self.assertIn('RELEASE_TAG="v3.0.0"', installer)
+        self.assertIn('RELEASE_TAG="v4.0.0"', installer)
         self.assertIn('uci set warp.main.sni="$MASKING_SNI"', installer)
+
+    def test_temporary_scanner_checksums_match_release_manifest(self):
+        manager = MANAGER.read_text(encoding="utf-8")
+        manifest = (ROOT / "release/SHA256SUMS").read_text(encoding="utf-8")
+        checksums = dict(
+            reversed(line.split()) for line in manifest.splitlines() if line.strip()
+        )
+        expected = {
+            "aarch64": checksums["warp-warpscout-0.16.0-r1-aarch64.apk"],
+            "aarch64_cortex-a53": checksums[
+                "warp-warpscout-0.16.0-r1-aarch64_cortex-a53.apk"
+            ],
+        }
+        self.assertIn(f"SCOUT_SHA_AARCH64='{expected['aarch64']}'", manager)
+        self.assertIn(f"SCOUT_SHA_A53='{expected['aarch64_cortex-a53']}'", manager)
 
 
 if __name__ == "__main__":

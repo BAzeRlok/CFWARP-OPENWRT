@@ -51,6 +51,7 @@ assert_managed_config() {
 	[ "$(stat -c '%a' /etc/warp/awg.conf)" = 600 ]
 	/usr/libexec/warp-awgctl get "$name" endpoint | grep -Eq '^[0-9.]+:[0-9]+$'
 	! uci show firewall | grep -Eq "(^|[.='])${name}([.=' ]|$)"
+	! apk info -e warp-warpscout >/dev/null 2>&1
 }
 
 case "$phase" in
@@ -111,10 +112,12 @@ registration_hash=$(sha256sum /etc/warp/awg-account.json | cut -d' ' -f1)
 $manager register >/dev/null
 [ "$registration_hash" = "$(sha256sum /etc/warp/awg-account.json | cut -d' ' -f1)" ]
 
+endpoint_before=$(/usr/libexec/warp-awgctl get "$name" endpoint)
 $manager disable >/dev/null
 [ -e /etc/warp/disabled ]
 $manager reconnect >/dev/null
 [ ! -e /etc/warp/disabled ]
+[ "$endpoint_before" = "$(/usr/libexec/warp-awgctl get "$name" endpoint)" ]
 snapshot reconnected
 assert_unchanged reconnected
 

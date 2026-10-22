@@ -4,12 +4,22 @@ set -eu
 umask 077
 
 REPOSITORY="BAzeRlok/CFWARP-OPENWRT"
-RELEASE_TAG="v3.0.0"
+RELEASE_TAG="v4.0.0"
 RELEASE_URL="https://github.com/$REPOSITORY/releases/download/$RELEASE_TAG"
-LUCI_PACKAGE="luci-app-warp-3.0.0-r6.apk"
-I18N_PACKAGE="luci-i18n-warp-ru-3.0.0.apk"
-MASKING_SNI="${WARP_SNI:-ozon.ru}"
-EXCLUDE_COUNTRIES="${WARP_EXCLUDE_COUNTRIES:-RU}"
+LUCI_PACKAGE="luci-app-warp-4.0.0-r1.apk"
+I18N_PACKAGE="luci-i18n-warp-ru-4.0.0.apk"
+SNI_SET="${WARP_SNI+x}"
+NODE_COUNTRIES_SET="${WARP_NODE_COUNTRIES+x}"
+NODES_SET="${WARP_NODES+x}"
+EXCLUDE_NODE_COUNTRIES_SET="${WARP_EXCLUDE_NODE_COUNTRIES+x}${WARP_EXCLUDE_COUNTRIES+x}"
+EXCLUDE_NODES_SET="${WARP_EXCLUDE_NODES+x}"
+UPSTREAM_INTERFACE_SET="${WARP_UPSTREAM_INTERFACE+x}"
+MASKING_SNI="${WARP_SNI:-}"
+NODE_COUNTRIES="${WARP_NODE_COUNTRIES:-}"
+NODES="${WARP_NODES:-}"
+EXCLUDE_NODE_COUNTRIES="${WARP_EXCLUDE_NODE_COUNTRIES:-${WARP_EXCLUDE_COUNTRIES:-}}"
+EXCLUDE_NODES="${WARP_EXCLUDE_NODES:-}"
+UPSTREAM_INTERFACE="${WARP_UPSTREAM_INTERFACE:-}"
 
 die() {
 	printf 'Ошибка: %s\n' "$*" >&2
@@ -50,7 +60,6 @@ fi
 case "$ARCH" in
 	aarch64|aarch64_cortex-a53)
 		AWG_PACKAGE="warp-awg-3.1.20260828-r3-$ARCH.apk"
-		SCOUT_PACKAGE="warp-warpscout-0.16.0-r1-$ARCH.apk"
 		;;
 	*)
 		die "для архитектуры $ARCH пока нет AWG backend; поддерживаются aarch64 и aarch64_cortex-a53"
@@ -62,7 +71,7 @@ trap 'rm -rf "$INSTALL_DIR"' EXIT HUP INT TERM
 
 printf 'Скачивание WARP %s для %s...\n' "$RELEASE_TAG" "$ARCH"
 download "$RELEASE_URL/SHA256SUMS" "$INSTALL_DIR/SHA256SUMS"
-for package in "$AWG_PACKAGE" "$SCOUT_PACKAGE" "$LUCI_PACKAGE" "$I18N_PACKAGE"; do
+for package in "$AWG_PACKAGE" "$LUCI_PACKAGE" "$I18N_PACKAGE"; do
 	download "$RELEASE_URL/$package" "$INSTALL_DIR/$package"
 	verify_file "$INSTALL_DIR/$package"
 done
@@ -70,13 +79,51 @@ done
 printf 'Установка проверенных пакетов...\n'
 apk add --allow-untrusted \
 	"$INSTALL_DIR/$AWG_PACKAGE" \
-	"$INSTALL_DIR/$SCOUT_PACKAGE" \
 	"$INSTALL_DIR/$LUCI_PACKAGE" \
 	"$INSTALL_DIR/$I18N_PACKAGE"
 
+[ "$SNI_SET" = x ] || MASKING_SNI=$(uci -q get warp.main.sni 2>/dev/null || true)
+[ -n "$MASKING_SNI" ] || MASKING_SNI=ozon.ru
+if [ "$NODE_COUNTRIES_SET" != x ]; then
+	NODE_COUNTRIES=$(uci -q get warp.main.node_countries 2>/dev/null || true)
+fi
+if [ "$NODES_SET" != x ]; then
+	NODES=$(uci -q get warp.main.nodes 2>/dev/null || true)
+fi
+if [ -z "$EXCLUDE_NODE_COUNTRIES_SET" ]; then
+	if EXCLUDE_NODE_COUNTRIES=$(uci -q get warp.main.exclude_node_countries 2>/dev/null); then
+		:
+	elif EXCLUDE_NODE_COUNTRIES=$(uci -q get warp.main.exclude_countries 2>/dev/null); then
+		:
+	else
+		EXCLUDE_NODE_COUNTRIES=RU
+	fi
+fi
+if [ "$EXCLUDE_NODES_SET" != x ]; then
+	if EXCLUDE_NODES=$(uci -q get warp.main.exclude_nodes 2>/dev/null); then
+		:
+	else
+		EXCLUDE_NODES=DME
+	fi
+fi
+if [ "$UPSTREAM_INTERFACE_SET" != x ]; then
+	UPSTREAM_INTERFACE=$(uci -q get warp.main.upstream_interface 2>/dev/null || true)
+fi
+
 uci set warp.main.sni="$MASKING_SNI"
-uci set warp.main.exclude_countries="$EXCLUDE_COUNTRIES"
+uci set warp.main.node_countries="$NODE_COUNTRIES"
+uci set warp.main.nodes="$NODES"
+uci set warp.main.exclude_node_countries="$EXCLUDE_NODE_COUNTRIES"
+uci set warp.main.exclude_nodes="$EXCLUDE_NODES"
+uci set warp.main.upstream_interface="$UPSTREAM_INTERFACE"
+uci -q delete warp.main.exclude_countries 2>/dev/null || true
 uci commit warp
+
+# WARPSCOUT is downloaded into /tmp only when registration or an explicit
+# endpoint search needs it. Remove the persistent copy left by older releases.
+if apk info -e warp-warpscout >/dev/null 2>&1; then
+	apk del warp-warpscout
+fi
 
 /etc/init.d/rpcd restart
 rm -f /tmp/luci-indexcache.*
@@ -94,4 +141,4 @@ case "$result" in
 esac
 
 /usr/libexec/warp-manager status
-printf '%s\n' 'Установка завершена. Пакет не меняет маршруты и firewall автоматически.'
+printf '%s\n' 'Установка завершена. DNS и firewall не изменяются; маршрут создаётся только для endpoint при заданном upstream-интерфейсе.'

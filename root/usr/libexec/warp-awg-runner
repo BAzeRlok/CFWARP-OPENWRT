@@ -10,13 +10,27 @@ AWG_GO_BIN="${WARP_AWG_GO_BIN:-/usr/libexec/warp-amneziawg-go}"
 AWG_CTL_BIN="${WARP_AWG_CTL_BIN:-/usr/libexec/warp-awgctl}"
 JSONFILTER_BIN="${WARP_JSONFILTER_BIN:-/usr/bin/jsonfilter}"
 IP_BIN="${WARP_IP_BIN:-/sbin/ip}"
+UCI_BIN="${WARP_UCI_BIN:-/sbin/uci}"
+UBUS_BIN="${WARP_UBUS_BIN:-/bin/ubus}"
 
 child=
+route_endpoint=
+route_device=
+route_gateway=
 
 cleanup() {
 	if [ -n "$child" ]; then
 		kill -TERM "$child" 2>/dev/null || true
 		wait "$child" 2>/dev/null || true
+	fi
+	if [ -n "$route_endpoint" ] && [ -n "$route_device" ]; then
+		if [ -n "$route_gateway" ]; then
+			"$IP_BIN" -4 route del "$route_endpoint/32" via "$route_gateway" \
+				dev "$route_device" metric 42760 2>/dev/null || true
+		else
+			"$IP_BIN" -4 route del "$route_endpoint/32" dev "$route_device" \
+				metric 42760 2>/dev/null || true
+		fi
 	fi
 }
 trap cleanup EXIT HUP INT TERM
@@ -42,12 +56,45 @@ valid_ipv6() {
 		printf '%s' "$1" | grep -q ':'
 }
 
+valid_device() {
+	printf '%s' "$1" | grep -Eq '^[A-Za-z0-9_.-]{1,15}$'
+}
+
+install_upstream_route() {
+	upstream=$($UCI_BIN -q get warp.main.upstream_interface 2>/dev/null || true)
+	[ -n "$upstream" ] || return 0
+	printf '%s' "$upstream" | grep -Eq '^[A-Za-z_][A-Za-z0-9_]{0,14}$' ||
+		fail 'invalid upstream interface'
+	[ "$upstream" != "$iface" ] || fail 'upstream interface creates a loop'
+	status=$($UBUS_BIN call "network.interface.$upstream" status 2>/dev/null) ||
+		fail 'upstream interface is unavailable'
+	route_device=$(printf '%s\n' "$status" | "$JSONFILTER_BIN" -e '@.l3_device' 2>/dev/null || true)
+	valid_device "$route_device" || fail 'upstream interface has no L3 device'
+	[ -e "/sys/class/net/$route_device" ] || fail 'upstream L3 device is unavailable'
+	[ "$route_device" != "$iface" ] || fail 'upstream interface creates a loop'
+	endpoint=$(sed -n 's/^[[:space:]]*Endpoint[[:space:]]*=[[:space:]]*\([0-9.]*\):[0-9][0-9]*[[:space:]]*$/\1/p' "$CONFIG" | sed -n '1p')
+	valid_ipv4 "$endpoint" || fail 'invalid endpoint for upstream route'
+	route_endpoint=$endpoint
+	default_route=$("$IP_BIN" -4 route show default dev "$route_device" 2>/dev/null | sed -n '1p')
+	route_gateway=$(printf '%s\n' "$default_route" | sed -n 's/.*[[:space:]]via[[:space:]]\([0-9.]*\).*/\1/p')
+	if [ -n "$route_gateway" ]; then
+		valid_ipv4 "$route_gateway" || fail 'invalid upstream gateway'
+		"$IP_BIN" -4 route replace "$route_endpoint/32" via "$route_gateway" \
+			dev "$route_device" metric 42760 || fail 'could not route WARP endpoint through upstream interface'
+	else
+		"$IP_BIN" -4 route replace "$route_endpoint/32" dev "$route_device" \
+			metric 42760 || fail 'could not route WARP endpoint through upstream interface'
+	fi
+}
+
 iface=${1:-}
 valid_interface "$iface" || fail 'invalid interface name'
 [ -x "$AWG_GO_BIN" ] || fail 'AmneziaWG daemon is missing'
 [ -x "$AWG_CTL_BIN" ] || fail 'AmneziaWG controller is missing'
 [ -x "$JSONFILTER_BIN" ] || fail 'jsonfilter is missing'
 [ -x "$IP_BIN" ] || fail 'ip is missing'
+[ -x "$UCI_BIN" ] || fail 'uci is missing'
+[ -x "$UBUS_BIN" ] || fail 'ubus is missing'
 [ -s "$ACCOUNT" ] || fail 'WARP account is missing'
 [ -s "$CONFIG" ] || fail 'AmneziaWG configuration is missing'
 
@@ -55,6 +102,8 @@ ipv4=$($JSONFILTER_BIN -i "$ACCOUNT" -e '@.ipv4' 2>/dev/null || true)
 ipv6=$($JSONFILTER_BIN -i "$ACCOUNT" -e '@.ipv6' 2>/dev/null || true)
 valid_ipv4 "$ipv4" || fail 'invalid WARP IPv4 address'
 [ -z "$ipv6" ] || valid_ipv6 "$ipv6" || fail 'invalid WARP IPv6 address'
+
+install_upstream_route
 
 "$AWG_GO_BIN" -f "$iface" &
 child=$!

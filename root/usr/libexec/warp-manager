@@ -7,6 +7,7 @@ STATE_DIR="${WARP_STATE_DIR:-/etc/warp}"
 ACCOUNT_FILE="$STATE_DIR/awg-account.json"
 AWG_CONFIG="$STATE_DIR/awg.conf"
 BACKEND_LOG="$STATE_DIR/backend.log"
+META_FILE="$STATE_DIR/endpoint-meta"
 DISABLED_FILE="$STATE_DIR/disabled"
 LAST_ERROR="$STATE_DIR/last_error"
 LOCK_DIR="${WARP_LOCK_DIR:-/var/lock/warp-manager.lock}"
@@ -15,7 +16,8 @@ FORCE_START_FILE="${WARP_FORCE_START_FILE:-/tmp/warp-force-start}"
 UCI_BIN="${WARP_UCI_BIN:-/sbin/uci}"
 UBUS_BIN="${WARP_UBUS_BIN:-/bin/ubus}"
 JSONFILTER_BIN="${WARP_JSONFILTER_BIN:-/usr/bin/jsonfilter}"
-SCOUT_BIN="${WARP_SCOUT_BIN:-/usr/libexec/warp-warpscout}"
+SCOUT_BIN="${WARP_SCOUT_BIN:-}"
+SCOUT_INSTALLED_BIN="${WARP_SCOUT_INSTALLED_BIN:-/usr/libexec/warp-warpscout}"
 AWG_GO_BIN="${WARP_AWG_GO_BIN:-/usr/libexec/warp-amneziawg-go}"
 AWG_CTL_BIN="${WARP_AWG_CTL_BIN:-/usr/libexec/warp-awgctl}"
 API_BIN="${WARP_API_BIN:-/usr/libexec/warp-api}"
@@ -24,9 +26,17 @@ IFDOWN_BIN="${WARP_IFDOWN_BIN:-/sbin/ifdown}"
 SERVICE_INIT="${WARP_SERVICE_INIT:-/etc/init.d/warp}"
 WATCHDOG_INIT="${WARP_WATCHDOG_INIT:-/etc/init.d/warp-watchdog}"
 PING_BIN="${WARP_PING_BIN:-/bin/ping}"
+CURL_BIN="${WARP_CURL_BIN:-/usr/bin/curl}"
+APK_BIN="${WARP_APK_BIN:-/sbin/apk}"
+SHA256_BIN="${WARP_SHA256_BIN:-/usr/bin/sha256sum}"
 SCOUT_JOBS="${WARP_SCOUT_JOBS:-2}"
 SCOUT_FAST_TARGETS='162.159.192.0/24,188.114.96.0/24,188.114.97.0/24'
 SCOUT_PING_TARGET='8.8.8.8'
+SCOUT_RELEASE_TAG='v4.0.0'
+SCOUT_RELEASE_URL="https://github.com/BAzeRlok/CFWARP-OPENWRT/releases/download/$SCOUT_RELEASE_TAG"
+SCOUT_VERSION='0.16.0-r1'
+SCOUT_SHA_AARCH64='d852382a566dbe939ff06055738dfa0a894dd323929bfc38a32e620f38b45cd7'
+SCOUT_SHA_A53='da4fd0e15b38ac9b751f7b7e2ffe9caed341d3c6818c86de52780362f7b59fd9'
 
 lock_held=0
 temp_batch=
@@ -37,6 +47,7 @@ temp_account=
 temp_full_config=
 temp_candidate=
 temp_old_config=
+temp_scout_dir=
 config_swapped=0
 STOP_WATCHDOG=1
 START_WATCHDOG=1
@@ -51,6 +62,7 @@ cleanup() {
 	[ -z "$temp_full_config" ] || rm -f -- "$temp_full_config"
 	[ -z "$temp_candidate" ] || rm -f -- "$temp_candidate"
 	[ -z "$temp_old_config" ] || rm -f -- "$temp_old_config"
+	[ -z "$temp_scout_dir" ] || rm -rf -- "$temp_scout_dir"
 	rm -f -- "$FORCE_START_FILE" 2>/dev/null || true
 	if [ "$lock_held" -eq 1 ]; then
 		rm -f -- "$LOCK_DIR/pid" 2>/dev/null || true
@@ -103,13 +115,58 @@ acquire_lock() {
 }
 
 require_dependencies() {
-	for path in "$UCI_BIN" "$UBUS_BIN" "$JSONFILTER_BIN" "$SCOUT_BIN" "$AWG_GO_BIN" \
+	for path in "$UCI_BIN" "$UBUS_BIN" "$JSONFILTER_BIN" "$AWG_GO_BIN" \
 		"$AWG_CTL_BIN" "$API_BIN" "$IFUP_BIN" "$IFDOWN_BIN" "$SERVICE_INIT" \
-		"$WATCHDOG_INIT" "$PING_BIN" /usr/bin/curl /sbin/ip; do
+		"$WATCHDOG_INIT" "$PING_BIN" "$CURL_BIN" /sbin/ip; do
 		[ -x "$path" ] || emit_error 'dependency_missing'
 	done
 	[ -r /etc/ssl/certs/ca-certificates.crt ] || [ -r /etc/ssl/cert.pem ] || emit_error 'ca_bundle_missing'
 	[ -c /dev/net/tun ] || emit_error 'tun_unavailable'
+}
+
+detect_architecture() {
+	architecture=$(sed -n 's/^DISTRIB_ARCH=//p' /etc/openwrt_release 2>/dev/null |
+		sed -n '1p' | tr -d "'\"")
+	if [ -z "$architecture" ]; then
+		architecture=$(sed -n 's/^OPENWRT_ARCH=//p' /usr/lib/os-release 2>/dev/null |
+			sed -n '1p' | tr -d "'\"")
+	fi
+	[ -n "$architecture" ] || architecture=$($APK_BIN --print-arch 2>/dev/null | sed -n '1p')
+	printf '%s\n' "$architecture"
+}
+
+ensure_scout() {
+	if [ -n "$SCOUT_BIN" ]; then
+		[ -x "$SCOUT_BIN" ] || emit_error 'dependency_missing'
+		return
+	fi
+	if [ -x "$SCOUT_INSTALLED_BIN" ]; then
+		SCOUT_BIN=$SCOUT_INSTALLED_BIN
+		return
+	fi
+	[ -x "$APK_BIN" ] && [ -x "$SHA256_BIN" ] || emit_error 'dependency_missing'
+	architecture=$(detect_architecture)
+	case "$architecture" in
+		aarch64) scout_sha=$SCOUT_SHA_AARCH64 ;;
+		aarch64_cortex-a53) scout_sha=$SCOUT_SHA_A53 ;;
+		*) emit_error 'unsupported_architecture' ;;
+	esac
+	scout_package="warp-warpscout-$SCOUT_VERSION-$architecture.apk"
+	temp_scout_dir="/tmp/warp-scout.$$"
+	mkdir "$temp_scout_dir" 2>/dev/null || emit_error 'state_directory_failed'
+	chmod 700 "$temp_scout_dir" || emit_error 'state_directory_failed'
+	scout_apk="$temp_scout_dir/$scout_package"
+	"$CURL_BIN" -fL --connect-timeout 15 --max-time 300 \
+		"$SCOUT_RELEASE_URL/$scout_package" -o "$scout_apk" \
+		>>"$BACKEND_LOG" 2>&1 || emit_error 'scout_download_failed'
+	actual_sha=$($SHA256_BIN "$scout_apk" 2>/dev/null | awk '{ print $1 }')
+	[ "$actual_sha" = "$scout_sha" ] || emit_error 'scout_integrity_failed'
+	mkdir "$temp_scout_dir/root" || emit_error 'scout_extract_failed'
+	$APK_BIN --allow-untrusted extract --destination "$temp_scout_dir/root" "$scout_apk" \
+		>>"$BACKEND_LOG" 2>&1 || emit_error 'scout_extract_failed'
+	rm -f -- "$scout_apk"
+	SCOUT_BIN="$temp_scout_dir/root/usr/libexec/warp-warpscout"
+	[ -x "$SCOUT_BIN" ] || emit_error 'scout_extract_failed'
 }
 
 require_runtime_dependencies() {
@@ -123,6 +180,16 @@ require_runtime_dependencies() {
 cfg_get() {
 	value=$($UCI_BIN -q get "warp.main.$1" 2>/dev/null || true)
 	[ -n "$value" ] && printf '%s\n' "$value" || printf '%s\n' "$2"
+}
+
+cfg_get_compat() {
+	if value=$($UCI_BIN -q get "warp.main.$1" 2>/dev/null); then
+		printf '%s\n' "$value"
+	elif [ -n "$2" ] && value=$($UCI_BIN -q get "warp.main.$2" 2>/dev/null); then
+		printf '%s\n' "$value"
+	else
+		printf '%s\n' "$3"
+	fi
 }
 
 valid_uci_name() {
@@ -157,9 +224,12 @@ validate_settings() {
 	CFG_MTU=$(cfg_get mtu 1280)
 	CFG_KEEPALIVE=$(cfg_get keepalive 25)
 	CFG_SNI=$(cfg_get sni ozon.ru)
-	CFG_EXCLUDE_COUNTRIES=$(cfg_get exclude_countries RU | tr '[:lower:]' '[:upper:]')
-	CFG_EXCLUDE_NODES=$(cfg_get exclude_nodes DME | tr '[:lower:]' '[:upper:]')
+	CFG_NODE_COUNTRIES=$(cfg_get node_countries '' | tr '[:lower:]' '[:upper:]')
+	CFG_NODES=$(cfg_get nodes '' | tr '[:lower:]' '[:upper:]')
+	CFG_EXCLUDE_NODE_COUNTRIES=$(cfg_get_compat exclude_node_countries exclude_countries RU | tr '[:lower:]' '[:upper:]')
+	CFG_EXCLUDE_NODES=$(cfg_get_compat exclude_nodes '' DME | tr '[:lower:]' '[:upper:]')
 	CFG_SCAN_SAMPLE=$(cfg_get scan_sample 3)
+	CFG_UPSTREAM=$(cfg_get upstream_interface '')
 	CFG_ACTUAL=$(cfg_get actual_interface '')
 	CFG_STORED_BACKEND=$(cfg_get actual_backend '')
 	CFG_BACKEND=$CFG_STORED_BACKEND
@@ -169,13 +239,30 @@ validate_settings() {
 	valid_uint_range "$CFG_MTU" 576 1420 || emit_error 'invalid_mtu'
 	valid_uint_range "$CFG_KEEPALIVE" 0 65535 || emit_error 'invalid_keepalive'
 	valid_hostname "$CFG_SNI" || emit_error 'invalid_sni'
-	valid_country_list "$CFG_EXCLUDE_COUNTRIES" || emit_error 'invalid_excluded_countries'
+	valid_country_list "$CFG_NODE_COUNTRIES" || emit_error 'invalid_node_countries'
+	valid_node_list "$CFG_NODES" || emit_error 'invalid_nodes'
+	valid_country_list "$CFG_EXCLUDE_NODE_COUNTRIES" || emit_error 'invalid_excluded_node_countries'
 	valid_node_list "$CFG_EXCLUDE_NODES" || emit_error 'invalid_excluded_nodes'
 	valid_uint_range "$CFG_SCAN_SAMPLE" 1 256 || emit_error 'invalid_scan_sample'
 	valid_uint_range "$SCOUT_JOBS" 1 4 || emit_error 'invalid_scan_workers'
 	[ -z "$CFG_ACTUAL" ] || valid_uci_name "$CFG_ACTUAL" || emit_error 'invalid_managed_interface'
+	[ -z "$CFG_UPSTREAM" ] || valid_uci_name "$CFG_UPSTREAM" || emit_error 'invalid_upstream_interface'
+	[ -z "$CFG_UPSTREAM" ] || [ "$CFG_UPSTREAM" != "$CFG_INTERFACE" ] || emit_error 'upstream_interface_loop'
 	[ -z "$CFG_STORED_BACKEND" ] || printf '%s' "$CFG_STORED_BACKEND" | grep -Eq '^[A-Za-z0-9_-]{1,32}$' || emit_error 'invalid_backend'
 	case "$CFG_BACKEND" in ''|amneziawg) ;; *) CFG_BACKEND= ;; esac
+}
+
+resolve_upstream_device() {
+	UPSTREAM_DEVICE=
+	[ -n "$CFG_UPSTREAM" ] || return 0
+	upstream_status=$($UBUS_BIN call "network.interface.$CFG_UPSTREAM" status 2>/dev/null) ||
+		emit_error 'upstream_interface_unavailable'
+	UPSTREAM_DEVICE=$(printf '%s\n' "$upstream_status" | $JSONFILTER_BIN -e '@.l3_device' 2>/dev/null || true)
+	printf '%s' "$UPSTREAM_DEVICE" | grep -Eq '^[A-Za-z0-9_.-]{1,15}$' ||
+		emit_error 'upstream_interface_unavailable'
+	[ -e "/sys/class/net/$UPSTREAM_DEVICE" ] || emit_error 'upstream_interface_unavailable'
+	[ "$UPSTREAM_DEVICE" != "$CFG_INTERFACE" ] || emit_error 'upstream_interface_loop'
+	[ -z "$CFG_ACTUAL" ] || [ "$UPSTREAM_DEVICE" != "$CFG_ACTUAL" ] || emit_error 'upstream_interface_loop'
 }
 
 json_get() {
@@ -234,13 +321,16 @@ ensure_account() {
 		account_valid || emit_error 'invalid_awg_account'
 		return
 	fi
+	ensure_scout
 	temp_account="$STATE_DIR/.awg-account.$$"
-	if ! GOMAXPROCS=1 NO_COLOR=1 "$SCOUT_BIN" register --plain --relay none \
-		--account "$temp_account" --gen-i1 quic --i1-sni "$CFG_SNI" \
-		>"$BACKEND_LOG" 2>&1; then
+	set -- register --plain --relay none --account "$temp_account" \
+		--gen-i1 quic --i1-sni "$CFG_SNI"
+	[ -z "$UPSTREAM_DEVICE" ] || set -- "$@" --interface "$UPSTREAM_DEVICE"
+	if ! GOMEMLIMIT=64MiB GOMAXPROCS=1 NO_COLOR=1 "$SCOUT_BIN" "$@" >"$BACKEND_LOG" 2>&1; then
 		rm -f -- "$temp_account"
-		if ! GOMAXPROCS=1 NO_COLOR=1 "$SCOUT_BIN" register --plain --relay none \
-			--account "$temp_account" >>"$BACKEND_LOG" 2>&1; then
+		set -- register --plain --relay none --account "$temp_account"
+		[ -z "$UPSTREAM_DEVICE" ] || set -- "$@" --interface "$UPSTREAM_DEVICE"
+		if ! GOMEMLIMIT=64MiB GOMAXPROCS=1 NO_COLOR=1 "$SCOUT_BIN" "$@" >>"$BACKEND_LOG" 2>&1; then
 			emit_error 'awg_registration_failed'
 		fi
 	fi
@@ -344,9 +434,12 @@ run_endpoint_scan() {
 		--no-report --conf "$temp_full_config" \
 		--table-off --no-dns --mtu "$CFG_MTU"
 	[ -z "$scan_targets" ] || set -- "$@" --target "$scan_targets"
-	[ -z "$CFG_EXCLUDE_COUNTRIES" ] || set -- "$@" --exclude-country "$CFG_EXCLUDE_COUNTRIES"
+	[ -z "$UPSTREAM_DEVICE" ] || set -- "$@" --interface "$UPSTREAM_DEVICE"
+	[ -z "$CFG_NODE_COUNTRIES" ] || set -- "$@" --country "$CFG_NODE_COUNTRIES"
+	[ -z "$CFG_NODES" ] || set -- "$@" --node "$CFG_NODES"
+	[ -z "$CFG_EXCLUDE_NODE_COUNTRIES" ] || set -- "$@" --exclude-country "$CFG_EXCLUDE_NODE_COUNTRIES"
 	[ -z "$CFG_EXCLUDE_NODES" ] || set -- "$@" --exclude-node "$CFG_EXCLUDE_NODES"
-	GOMAXPROCS=1 NO_COLOR=1 "$SCOUT_BIN" "$@" >>"$BACKEND_LOG" 2>&1 &&
+	GOMEMLIMIT=64MiB GOMAXPROCS=1 NO_COLOR=1 "$SCOUT_BIN" "$@" >>"$BACKEND_LOG" 2>&1 &&
 		[ -s "$temp_full_config" ]
 }
 
@@ -357,6 +450,7 @@ accept_scanned_candidate() {
 }
 
 scan_candidate() {
+	ensure_scout
 	temp_full_config="$STATE_DIR/.warpscout-conf.$$"
 	if [ "$CFG_SCAN_SAMPLE" -gt 1 ]; then
 		backend_note "Fast endpoint scan: core pools, sample 1, workers $SCOUT_JOBS, ping target $SCOUT_PING_TARGET"
@@ -590,6 +684,30 @@ recent_handshake() {
 	[ "$age" -ge 0 ] && [ "$age" -le "$maximum_age" ]
 }
 
+refresh_metadata_async() {
+	interface_name=$1
+	endpoint=$2
+	(
+		trace_file="/tmp/warp-trace.$$"
+		meta_file="$STATE_DIR/.endpoint-meta.$$"
+		trap 'rm -f -- "$trace_file" "$meta_file"' EXIT HUP INT TERM
+		"$CURL_BIN" -4 -fsS --interface "$interface_name" \
+			--connect-timeout 5 --max-time 10 \
+			https://1.1.1.1/cdn-cgi/trace -o "$trace_file" || exit 0
+		node=$(sed -n 's/^colo=\([A-Z][A-Z][A-Z]\)$/\1/p' "$trace_file" | sed -n '1p')
+		seen_as=$(sed -n 's/^loc=\([A-Z][A-Z]\)$/\1/p' "$trace_file" | sed -n '1p')
+		[ -n "$node" ] && [ -n "$seen_as" ] || exit 0
+		{
+			printf 'endpoint=%s\n' "$endpoint"
+			printf 'node=%s\n' "$node"
+			printf 'seen_as=%s\n' "$seen_as"
+			printf 'checked_at=%s\n' "$(date +%s 2>/dev/null || printf '0')"
+		} >"$meta_file" || exit 0
+		chmod 600 "$meta_file" || exit 0
+		mv -f -- "$meta_file" "$META_FILE"
+	) >/dev/null 2>&1 &
+}
+
 runtime_start() {
 	RUNTIME_START_ERROR=interface_up_failed
 	rm -f -- "$DISABLED_FILE"
@@ -626,6 +744,7 @@ runtime_start() {
 		if "$PING_BIN" -4 -I "$ACTUAL_INTERFACE" -c 1 -W 2 1.1.1.1 >/dev/null 2>&1 ||
 			recent_handshake "$ACTUAL_INTERFACE" 60; then
 			[ "$START_WATCHDOG" -eq 0 ] || "$WATCHDOG_INIT" restart >/dev/null 2>&1 || true
+			refresh_metadata_async "$ACTUAL_INTERFACE" "$AWG_ENDPOINT"
 			return 0
 		fi
 		sleep 1
@@ -688,6 +807,7 @@ connect_tunnel() {
 	}
 	require_dependencies
 	validate_settings
+	resolve_upstream_device
 	mkdir -p "$STATE_DIR" 2>/dev/null || emit_error 'state_directory_failed'
 	chmod 700 "$STATE_DIR" || emit_error 'state_directory_failed'
 	: >"$BACKEND_LOG" || emit_error 'state_write_failed'
@@ -724,7 +844,12 @@ do_enable() {
 
 do_reconnect() {
 	acquire_lock
-	connect_tunnel 'reconnected' 1 0
+	connect_tunnel 'reconnected' 0 0
+}
+
+do_rescan() {
+	acquire_lock
+	connect_tunnel 'rescanned' 1 0
 }
 
 do_recover() {
@@ -733,6 +858,7 @@ do_recover() {
 	START_WATCHDOG=0
 	require_runtime_dependencies
 	validate_settings
+	resolve_upstream_device
 	account_valid || emit_error 'invalid_awg_account'
 	awg_config_valid || emit_error 'invalid_awg_config'
 	[ -n "$CFG_ACTUAL" ] && interface_owned "$CFG_ACTUAL" || emit_error 'managed_interface_missing'
@@ -774,7 +900,7 @@ do_unregister() {
 	remove_managed_network "$CFG_ACTUAL"
 	clear_actual_state
 	$UBUS_BIN call network reload '{}' >/dev/null 2>&1 || emit_error 'network_reload_failed'
-	rm -f -- "$ACCOUNT_FILE" "$AWG_CONFIG" "$BACKEND_LOG" "$DISABLED_FILE" "$LAST_ERROR" \
+	rm -f -- "$ACCOUNT_FILE" "$AWG_CONFIG" "$BACKEND_LOG" "$META_FILE" "$DISABLED_FILE" "$LAST_ERROR" \
 		"$STATE_DIR/last_recovery"
 	emit_success 'unregistered' ''
 }
@@ -790,6 +916,8 @@ do_status() {
 	last_handshake=0
 	rx_bytes=0
 	tx_bytes=0
+	node=
+	seen_as=
 
 	if [ -d "$LOCK_DIR" ]; then
 		state=registering
@@ -802,6 +930,10 @@ do_status() {
 			elif [ -n "$CFG_ACTUAL" ] && interface_owned "$CFG_ACTUAL"; then
 				managed=true
 				endpoint=$AWG_ENDPOINT
+				if [ -s "$META_FILE" ] && [ "$(conf_value "$META_FILE" endpoint)" = "$endpoint" ]; then
+					node=$(conf_value "$META_FILE" node)
+					seen_as=$(conf_value "$META_FILE" seen_as)
+				fi
 				if [ -e "$DISABLED_FILE" ]; then
 					state=disabled
 				elif [ -r "/sys/class/net/$CFG_ACTUAL/tun_flags" ]; then
@@ -830,9 +962,10 @@ do_status() {
 	fi
 	backend=
 	[ "$CFG_BACKEND" != amneziawg ] || backend=amneziawg
-	printf '{"ok":true,"state":"%s","interface":"%s","backend":"%s","registered":%s,"managed":%s,"up":%s,"endpoint":"%s","last_handshake":%s,"rx_bytes":%s,"tx_bytes":%s,"error_code":"%s"}\n' \
+	printf '{"ok":true,"state":"%s","interface":"%s","backend":"%s","registered":%s,"managed":%s,"up":%s,"endpoint":"%s","node":"%s","seen_as":"%s","upstream_interface":"%s","last_handshake":%s,"rx_bytes":%s,"tx_bytes":%s,"error_code":"%s"}\n' \
 		"$(json_escape "$state")" "$(json_escape "$CFG_ACTUAL")" "$(json_escape "$backend")" \
-		"$registered" "$managed" "$up" "$(json_escape "$endpoint")" "$last_handshake" \
+		"$registered" "$managed" "$up" "$(json_escape "$endpoint")" "$(json_escape "$node")" \
+		"$(json_escape "$seen_as")" "$(json_escape "$CFG_UPSTREAM")" "$last_handshake" \
 		"$rx_bytes" "$tx_bytes" "$(json_escape "$error_code")"
 }
 
@@ -841,6 +974,7 @@ case "${1:-}" in
 	enable) do_enable ;;
 	disable) do_disable ;;
 	reconnect) do_reconnect ;;
+	rescan) do_rescan ;;
 	status) do_status ;;
 	unregister) do_unregister ;;
 	recover) do_recover ;;
