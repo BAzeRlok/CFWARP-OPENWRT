@@ -4,9 +4,9 @@ set -eu
 umask 077
 
 REPOSITORY="BAzeRlok/CFWARP-OPENWRT"
-RELEASE_TAG="v4.0.1"
+RELEASE_TAG="v4.0.2"
 RELEASE_URL="https://github.com/$REPOSITORY/releases/download/$RELEASE_TAG"
-SCOUT_VERSION="0.16.0-r1"
+SCOUT_VERSION="0.16.0-r2"
 ACCOUNT_FILE="/etc/warp/awg-account.json"
 WAN_INTERFACE="${WARP_TEST_INTERFACE:-wan}"
 WAN_DEVICE="${WARP_TEST_DEVICE:-}"
@@ -116,10 +116,10 @@ if [ -z "$architecture" ]; then
 fi
 case "$architecture" in
 	aarch64)
-	scout_sha='d852382a566dbe939ff06055738dfa0a894dd323929bfc38a32e620f38b45cd7'
+	scout_sha='cb1935ca22b88bd16f3ac543edd4ba18478a41de6209bdfa08d6a8224926118e'
 	;;
 	aarch64_cortex-a53)
-	scout_sha='da4fd0e15b38ac9b751f7b7e2ffe9caed341d3c6818c86de52780362f7b59fd9'
+	scout_sha='69514c915115d763f7bba445ddbf9e8f3ece992757383fae7474a4725cc30981'
 	;;
 	*) die "архитектура $architecture не поддерживается" ;;
 esac

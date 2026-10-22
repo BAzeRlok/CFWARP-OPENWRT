@@ -188,6 +188,7 @@ PersistentKeepalive = 25
         awg_memory_patch = (ROOT / "warp-awg/patches/100-openwrt-memory.patch").read_text(encoding="utf-8")
         scout_package = (ROOT / "warp-warpscout/Makefile").read_text(encoding="utf-8")
         scout_patch = (ROOT / "warp-warpscout/patches/100-awg-only.patch").read_text(encoding="utf-8")
+        scout_minimal_patch = (ROOT / "warp-warpscout/patches/110-minimal-helper.patch").read_text(encoding="utf-8")
 
         self.assertIn('SCOUT_BIN="${WARP_SCOUT_BIN:-}"', manager)
         self.assertIn("ensure_scout()", manager)
@@ -241,9 +242,13 @@ PersistentKeepalive = 25
         self.assertIn("GOMEMLIMIT=48MiB", init)
         self.assertIn("WG_PROCESS_FOREGROUND=1", init)
         self.assertIn("PKG_VERSION:=0.16.0", scout_package)
+        self.assertIn("PKG_RELEASE:=2", scout_package)
         self.assertIn("PKG_HASH:=c21c777239856401f6529e4e2503d9f6ebd9071f78988fe86e35aaefc65a1c20", scout_package)
         self.assertIn("return mintWGAccount(ctx, client, existing)", scout_patch)
         self.assertIn("//go:build warpscout_full", scout_patch)
+        self.assertIn("diff --git a/mini_flags.go b/mini_flags.go", scout_minimal_patch)
+        self.assertIn("warp-scanner <scan|register>", scout_minimal_patch)
+        self.assertIn("//go:build warpscout_full", scout_minimal_patch)
         self.assertNotIn('github.com/Diniboy1123/connect-ip-go', scout_package)
         self.assertFalse((ROOT / "warp-usque/Makefile").exists())
 
@@ -327,14 +332,14 @@ PersistentKeepalive = 25
     def test_installer_selects_supported_arm64_packages(self):
         installer = (ROOT / "install.sh").read_text(encoding="utf-8")
         self.assertIn("aarch64|aarch64_cortex-a53)", installer)
-        self.assertIn('LUCI_PACKAGE="luci-app-warp-4.0.1-r1.apk"', installer)
+        self.assertIn('LUCI_PACKAGE="luci-app-warp-4.0.2-r1.apk"', installer)
         self.assertIn('AWG_PACKAGE="warp-awg-3.1.20260828-r3-$ARCH.apk"', installer)
         self.assertNotIn('SCOUT_PACKAGE=', installer)
         self.assertIn("apk del warp-warpscout", installer)
         self.assertIn('result=$(/usr/libexec/warp-manager enable)', installer)
         self.assertIn("DISTRIB_ARCH", installer)
         self.assertIn("OPENWRT_ARCH", installer)
-        self.assertIn('RELEASE_TAG="v4.0.1"', installer)
+        self.assertIn('RELEASE_TAG="v4.0.2"', installer)
         self.assertIn('uci set warp.main.sni="$MASKING_SNI"', installer)
 
     def test_region_probe_prepares_apk_destination(self):
@@ -352,9 +357,9 @@ PersistentKeepalive = 25
             reversed(line.split()) for line in manifest.splitlines() if line.strip()
         )
         expected = {
-            "aarch64": checksums["warp-warpscout-0.16.0-r1-aarch64.apk"],
+            "aarch64": checksums["warp-warpscout-0.16.0-r2-aarch64.apk"],
             "aarch64_cortex-a53": checksums[
-                "warp-warpscout-0.16.0-r1-aarch64_cortex-a53.apk"
+                "warp-warpscout-0.16.0-r2-aarch64_cortex-a53.apk"
             ],
         }
         self.assertIn(f"SCOUT_SHA_AARCH64='{expected['aarch64']}'", manager)

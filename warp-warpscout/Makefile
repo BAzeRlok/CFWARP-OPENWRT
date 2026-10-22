@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=warp-warpscout
 PKG_VERSION:=0.16.0
-PKG_RELEASE:=1
+PKG_RELEASE:=2
 
 PKG_SOURCE:=warpscout-$(PKG_VERSION).tar.gz
 PKG_SOURCE_URL:=https://codeload.github.com/vernette/warpscout/tar.gz/refs/tags/v$(PKG_VERSION)?
@@ -27,14 +27,14 @@ include $(TOPDIR)/feeds/packages/lang/golang/golang-package.mk
 define Package/warp-warpscout
   SECTION:=net
   CATEGORY:=Network
-  TITLE:=WARP endpoint discovery helper for luci-app-warp
+  TITLE:=Minimal WARP registration and AWG endpoint helper
   URL:=https://github.com/vernette/warpscout
   DEPENDS:=$(GO_ARCH_DEPENDS) +ca-bundle
 endef
 
 define Package/warp-warpscout/description
-  A private WARPSCOUT build used to register WARP and select a verified
-  AmneziaWG endpoint outside excluded exit locations.
+  A private, non-interactive WARPSCOUT build containing only WARP registration,
+  AmneziaWG endpoint verification and native configuration output.
 endef
 
 define Package/warp-warpscout/install

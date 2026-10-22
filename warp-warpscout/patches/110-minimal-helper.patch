@@ -1,0 +1,1548 @@
+diff --git a/cli.go b/cli.go
+index 6db7664..e7ccaa6 100644
+--- a/cli.go
++++ b/cli.go
+@@ -31,7 +31,7 @@ var commands = []command{
+ 			"ping to the endpoint address; -tun-ping adds TUN PING, measured inside the tunnel.",
+ 			"Needs a WARP account: run \"warpscout register\" first.",
+ 		},
+-		groups: []flagGroup{scanGroup, protoGroup, awgGroup, nestGroup, outputGroup},
++		groups: []flagGroup{scanGroup, awgGroup, plainGroup},
+ 		setup:  setupScanFlags,
+ 		run:    runScanCmd,
+ 	},
+@@ -44,54 +44,13 @@ var commands = []command{
+ 			"rotate the keys instead of burning a new registration; -fresh forces a",
+ 			"brand-new account.",
+ 			"",
+-			"Falls back to registering through a WARP tunnel when the Cloudflare API",
+-			"is unreachable directly, trying AmneziaWG then WireGuard; -proxy skips",
+-			"that fallback, so the AmneziaWG parameters below only shape it.",
++			"Falls back to registering through an AmneziaWG tunnel when the",
++			"Cloudflare API is unreachable directly.",
+ 		},
+-		groups: []flagGroup{registerGroup, awgGroup, plainGroup},
++		groups: []flagGroup{awgGroup, plainGroup},
+ 		setup:  setupRegisterFlags,
+ 		run:    runRegisterCmd,
+ 	},
+-	{
+-		name:  "find-junk",
+-		brief: "search AmneziaWG junk params that unblock every endpoint",
+-		intro: []string{
+-			"Rescans with a fresh random junk set (and a fresh I1 when -gen-i1 is set)",
+-			"until one set brings up the -threshold share of the sampled endpoints,",
+-			"then prints the scan command to reuse it. Ctrl+C keeps the best set so far.",
+-			"",
+-			"Verifies by handshake and in-tunnel ping only - no exit colo is resolved.",
+-		},
+-		groups: []flagGroup{findJunkGroup, findJunkI1Group, plainGroup},
+-		setup:  setupFindJunkFlags,
+-		run:    runFindJunkCmd,
+-	},
+-	{
+-		name:  "socks",
+-		brief: "serve one endpoint as a local SOCKS5 proxy (for testing it)",
+-		intro: []string{
+-			"Brings up a single tunnel to -endpoint and hands it out as a SOCKS5 proxy on",
+-			"localhost, so curl, a browser or any geo-lookup tool can be pointed at that",
+-			"one endpoint without installing a VPN client and without root.",
+-			"",
+-			"For testing an endpoint, not for daily use: one tunnel, no reconnect, no",
+-			"failover - when DPI cuts it the proxy just stops working. For everyday use",
+-			"take \"scan -conf\" into a real client.",
+-			"",
+-			"-through works here too, and it is the only way to try a nested tunnel",
+-			"without building the interface chain by hand.",
+-		},
+-		groups: []flagGroup{socksGroup, protoGroup, awgGroup, nestGroup},
+-		setup:  setupSocksFlags,
+-		run:    runSocksCmd,
+-	},
+-	{
+-		name:  "version",
+-		brief: "print the warpscout version",
+-		intro: []string{"Prints the version alone, so a script can compare it as is."},
+-		setup: func(*flag.FlagSet, *options) {},
+-		run:   runVersionCmd,
+-	},
+ }
+ 
+ // gvisor allocates per packet, so a -f scan doubles the heap between GCs and the
+@@ -105,8 +64,6 @@ func main() {
+ 		debug.SetMemoryLimit(defaultMemLimit)
+ 	}
+ 	stripLoaderArg()
+-	enableVirtualTerminal()
+-	errPal = palette{enabled: colorEnabled(os.Stderr)}
+ 
+ 	if len(os.Args) < 2 {
+ 		rootUsage(os.Stderr)
+@@ -132,16 +89,9 @@ func main() {
+ 	fs.Parse(os.Args[2:])
+ 	applyCommonFlags(fs, &opts)
+ 
+-	showEmoji = opts.emoji
+-
+ 	ctx, cancel := context.WithCancel(context.Background())
+ 	defer cancel()
+ 
+-	// "version" must stay a bare string: install.sh compares its whole output.
+-	if cmd.name != "version" {
+-		noticeUpdate(ctx)
+-	}
+-
+ 	if err := cmd.run(ctx, opts); err != nil {
+ 		fmt.Fprintln(os.Stderr, errPal.fail(err.Error()))
+ 		os.Exit(1)
+diff --git a/console_other.go b/console_other.go
+index 1375da0..c9add88 100644
+--- a/console_other.go
++++ b/console_other.go
+@@ -1,4 +1,4 @@
+-//go:build !windows
++//go:build !windows && warpscout_full
+ 
+ package main
+ 
+diff --git a/console_windows.go b/console_windows.go
+index e11bbce..0b0deec 100644
+--- a/console_windows.go
++++ b/console_windows.go
+@@ -1,4 +1,4 @@
+-//go:build windows
++//go:build windows && warpscout_full
+ 
+ package main
+ 
+diff --git a/findjunk.go b/findjunk.go
+index 7ebb19e..9ec8afb 100644
+--- a/findjunk.go
++++ b/findjunk.go
+@@ -1,3 +1,5 @@
++//go:build warpscout_full
++
+ package main
+ 
+ import (
+diff --git a/flags.go b/flags.go
+index 3a98d55..58edf32 100644
+--- a/flags.go
++++ b/flags.go
+@@ -1,3 +1,5 @@
++//go:build warpscout_full
++
+ package main
+ 
+ import (
+diff --git a/main.go b/main.go
+index 4a6c728..cf8ca31 100644
+--- a/main.go
++++ b/main.go
+@@ -6,29 +6,19 @@ import (
+ 	"io"
+ 	"net/netip"
+ 	"os"
+-	"runtime/debug"
+ 	"strings"
+-	"sync/atomic"
+ 	"time"
+-
+-	tea "github.com/charmbracelet/bubbletea"
+ )
+ 
+ // register needs this too - its tunnel fallback registers through one of the
+ // sampled addresses.
+ func setupScan(opts options) (protoRun, []netip.Addr, error) {
+-	// -proto is the tunnel that crosses this network, which under -through is the
+-	// outer one; what gets scanned then runs inside it.
+-	proto := opts.proto
+-	if opts.through != "" {
+-		proto = opts.innerProto
+-	}
+-	run, err := parseProto(proto)
++	run, err := parseProto(opts.proto)
+ 	if err != nil {
+ 		return run, nil, err
+ 	}
+ 
+-	pools = poolsFor(run, opts.ipv6)
++	pools = poolsFor(run, false)
+ 	if len(opts.targets) > 0 {
+ 		pools = opts.targets
+ 	}
+@@ -38,23 +28,17 @@ func setupScan(opts options) (protoRun, []netip.Addr, error) {
+ 		if !deviceBindSupported {
+ 			return run, nil, fmt.Errorf("-interface requires Linux (SO_BINDTODEVICE)")
+ 		}
+-		ip, err := interfaceAddr(opts.iface, opts.ipv6)
++		ip, err := interfaceAddr(opts.iface, false)
+ 		if err != nil {
+ 			return run, nil, err
+ 		}
+ 		scanInterface = opts.iface
+ 		scanSourceIP = ip
+-	} else if opts.through == "" && !haveAddrFamily(opts.ipv6) {
+-		// With -through the endpoints are dialled from inside the outer tunnel,
+-		// which carries both families whatever the host has.
+-		return run, nil, fmt.Errorf("no routable %s address on this host - nothing to scan", famName(opts.ipv6))
++	} else if !haveAddrFamily(false) {
++		return run, nil, fmt.Errorf("no routable IPv4 address on this host - nothing to scan")
+ 	}
+ 
+-	sample := opts.perSubnet
+-	if opts.full {
+-		sample = 0
+-	}
+-	return run, expandPools(sample), nil
++	return run, expandPools(opts.perSubnet), nil
+ }
+ 
+ func loadScanAccount(path string) error {
+@@ -72,9 +56,6 @@ func loadScanAccount(path string) error {
+ }
+ 
+ func runRegisterCmd(ctx context.Context, opts options) error {
+-	if err := applyRelay(&opts); err != nil {
+-		return err
+-	}
+ 	_, ips, err := setupScan(opts)
+ 	if err != nil {
+ 		return err
+@@ -90,10 +71,7 @@ func runRegisterCmd(ctx context.Context, opts options) error {
+ 
+ 	a, err := obtainAccount(ctx, opts, ips, timeout, existing)
+ 	if err != nil {
+-		if opts.proxy == "" {
+-			return fmt.Errorf("registration failed: %v\ncould not register directly or through a WARP tunnel; retry with -proxy <http(s)/socks5 URL>", err)
+-		}
+-		return fmt.Errorf("registration failed: %v", err)
++		return fmt.Errorf("registration failed directly and through an AmneziaWG tunnel: %v", err)
+ 	}
+ 	if err := saveAccount(opts.accountPath, a); err != nil {
+ 		return fmt.Errorf("could not save account to %s: %v", opts.accountPath, err)
+@@ -113,20 +91,6 @@ func validateThreshold(pct int) error {
+ 	return nil
+ }
+ 
+-func runFindJunkCmd(ctx context.Context, opts options) error {
+-	if err := validateThreshold(opts.threshold); err != nil {
+-		return err
+-	}
+-	if err := loadScanAccount(opts.accountPath); err != nil {
+-		return err
+-	}
+-	run, _, err := setupScan(opts)
+-	if err != nil {
+-		return err
+-	}
+-	return runFindJunk(ctx, opts, run, time.Duration(opts.timeoutSec)*time.Second)
+-}
+-
+ func runScanCmd(ctx context.Context, opts options) error {
+ 	if err := loadScanAccount(opts.accountPath); err != nil {
+ 		return err
+@@ -138,14 +102,6 @@ func runScanCmd(ctx context.Context, opts options) error {
+ 	ctx, cancel := context.WithCancel(ctx)
+ 	defer cancel()
+ 
+-	if opts.through != "" {
+-		n, err := dialOuter(ctx, opts, time.Duration(opts.timeoutSec)*time.Second)
+-		if err != nil {
+-			return err
+-		}
+-		defer n.tunnel.Close()
+-		outer = n
+-	}
+ 	ph, err := runScanUI(ctx, cancel, opts, run, ips, time.Duration(opts.timeoutSec)*time.Second, "", "")
+ 	if err != nil {
+ 		// runScan already reported the failure through the emit seam.
+@@ -163,26 +119,11 @@ func runScanCmd(ctx context.Context, opts options) error {
+ 		return fmt.Errorf("%s", noEndpointMsg(opts))
+ 	}
+ 
+-	if (opts.speed || opts.bestBy == bestKeySpeed) && showsSpeed(opts) {
+-		if !opts.speed {
+-			fmt.Fprintln(os.Stderr, errPal.dim("\n-best-by speed ranks by throughput, so the speedtest phase runs even without -speed"))
+-		}
+-		runWithUI(opts, cancel, false, "", "q to skip the rest", func(emit emitter) {
+-			measureSpeed(ctx, ph, time.Duration(opts.timeoutSec)*time.Second, emit)
+-		})
++	if opts.conf != confStdout {
++		writeConsole(os.Stdout, ph, opts.tunPingCheck)
+ 	}
+ 
+-	// Held rather than returned: the scan itself succeeded, so the report file is
+-	// still written and only the exit status carries the failure.
+ 	var outErr error
+-	switch {
+-	case opts.best:
+-		outErr = printBest(os.Stdout, ph)
+-	case opts.conf == confStdout:
+-	default:
+-		writeConsole(os.Stdout, ph, consoleRenderer(os.Stdout), opts.tunPingCheck)
+-	}
+-
+ 	if opts.conf != "" {
+ 		if err := writeConfFile(opts, ph); outErr == nil {
+ 			outErr = err
+@@ -194,7 +135,7 @@ func runScanCmd(ctx context.Context, opts options) error {
+ 	}
+ 
+ 	reportPath := opts.output
+-	if reportPath == "" && (opts.best || opts.conf == confStdout) {
++	if reportPath == "" && opts.conf == confStdout {
+ 		return outErr
+ 	}
+ 	if reportPath == "" {
+@@ -208,88 +149,6 @@ func runScanCmd(ctx context.Context, opts options) error {
+ 	return outErr
+ }
+ 
+-// wantMeta is what only scan sets, and only scan prints the tables that repeat
+-// the live feed endpoint for endpoint.
+-func tablesFollow(opts options) bool {
+-	return opts.wantMeta && !opts.best && opts.conf != confStdout
+-}
+-
+-func showsSpeed(opts options) bool {
+-	if opts.bestBy == bestKeySpeed {
+-		return true
+-	}
+-	if !opts.best && opts.conf != confStdout {
+-		return true
+-	}
+-	return !opts.noReport && opts.output != ""
+-}
+-
+-func measureSpeed(ctx context.Context, ph phaseResult, timeout time.Duration, emit emitter) {
+-	picks := speedTargets(ph.results)
+-	const label = "Speedtest phase: measuring picked endpoints one at a time"
+-	emit(barBeginMsg{label: label, total: len(picks)})
+-
+-	prevGC := debug.SetGCPercent(speedGCPercent)
+-	defer debug.SetGCPercent(prevGC)
+-
+-	tn, err := newTunnel(ph.run)
+-	if err != nil {
+-		emit(stepMsg{fail: true, summary: fmt.Sprintf("speedtest failed: %v", err)})
+-		return
+-	}
+-	defer closeAfterDrain(tn)
+-
+-	speeds := make(map[string]float64, len(picks))
+-	for _, p := range picks {
+-		if ctx.Err() != nil {
+-			break
+-		}
+-		speeds[p.endpoint] = endpointSpeed(ctx, tn, p.endpoint, timeout)
+-		emit(speedMsg{endpoint: p.endpoint, mbps: speeds[p.endpoint]})
+-		emit(probedMsg{})
+-	}
+-	for i, r := range ph.results {
+-		ph.results[i].speed = speeds[r.endpoint]
+-	}
+-
+-	emit(barEndMsg{label: label, summary: fastestNote(speeds)})
+-	emit(doneMsg{})
+-}
+-
+-func fastestNote(speeds map[string]float64) string {
+-	var endpoint string
+-	var best float64
+-	for ep, mbps := range speeds {
+-		if mbps > best {
+-			best, endpoint = mbps, ep
+-		}
+-	}
+-	if endpoint == "" {
+-		return "nothing measured"
+-	}
+-	return fmt.Sprintf("fastest %s at %s", speedStr(best), endpoint)
+-}
+-
+-func closeAfterDrain(tn tunnel) {
+-	time.Sleep(speedDrain)
+-	tn.Close()
+-}
+-
+-func endpointSpeed(ctx context.Context, tn tunnel, endpoint string, timeout time.Duration) float64 {
+-	for attempt := 0; attempt < max(tn.attempts(), 1); attempt++ {
+-		if ctx.Err() != nil {
+-			break
+-		}
+-		if !tn.handshake(ctx, endpoint, timeout) {
+-			continue
+-		}
+-		if mbps, ok := tn.stack().speedTest(ctx); ok {
+-			return mbps
+-		}
+-	}
+-	return 0
+-}
+-
+ func anyEndpoint(ph phaseResult) bool {
+ 	for _, r := range ph.results {
+ 		if r.ok {
+@@ -371,13 +230,6 @@ func writeConfFile(opts options, ph phaseResult) error {
+ 		return nil
+ 	}
+ 	fmt.Fprintln(os.Stderr, errPal.dim(fmt.Sprintf("\n%s config for %s written to %s", ph.run.name, best.endpoint, opts.conf)))
+-	if outer != nil {
+-		note := fmt.Sprintf("  it holds both tunnels of the chain (outer %s) - split it in two before use", outer.label)
+-		if isMihomo(opts.confType) {
+-			note = fmt.Sprintf("  it chains through %s itself (dialer-proxy)", outer.label)
+-		}
+-		fmt.Fprintln(os.Stderr, errPal.dim(note))
+-	}
+ 	return nil
+ }
+ 
+@@ -412,70 +264,24 @@ func runScanUI(ctx context.Context, cancel context.CancelFunc, opts options, run
+ 	return ph, scanErr
+ }
+ 
+-func runWithUI(opts options, cancel context.CancelFunc, ping bool, header, quitHint string, work func(emitter)) error {
+-	if usePlainOutput(opts) {
+-		work(plainEmit)
+-		return nil
+-	}
+-
+-	m := newScanModel(cancel, ping)
+-	m.header = header
+-	m.dropLists = tablesFollow(opts)
+-	if quitHint != "" {
+-		m.quitHint = quitHint
+-	}
+-	p := tea.NewProgram(m, tea.WithOutput(os.Stderr))
+-	defer enableVirtualTerminal()
+-
+-	// A terminal the TUI cannot drive is not a reason to fail the run.
+-	// Fall back to the plain emitter and keep scanning.
+-	var uiFailed atomic.Bool
+-	emit := func(msg tea.Msg) {
+-		if uiFailed.Load() {
+-			plainEmit(msg)
+-			return
+-		}
+-		p.Send(msg)
+-	}
+-
+-	workDone := make(chan struct{})
+-	go func() {
+-		work(emit)
+-		// Only doneMsg quits the program, and an error path returns without one:
+-		// without this the TUI spins on forever under the failure it just printed.
+-		emit(doneMsg{})
+-		close(workDone)
+-	}()
+-	if _, err := p.Run(); err != nil {
+-		uiFailed.Store(true)
+-		fmt.Fprintln(os.Stderr, errPal.fail("live output unavailable: "+err.Error()))
+-	}
+-	<-workDone
++func runWithUI(_ options, _ context.CancelFunc, _ bool, _, _ string, work func(emitter)) error {
++	work(plainEmit)
+ 	return nil
+ }
+ 
+-func usePlainOutput(opts options) bool {
+-	return opts.plain || os.Getenv("NO_COLOR") != "" || !isTerminal(os.Stderr)
+-}
++func usePlainOutput(options) bool { return true }
+ 
+ func runScan(ctx context.Context, opts options, run protoRun, ips []netip.Addr, timeout time.Duration, emit emitter) (phaseResult, error) {
+ 	if scanSourceIP.IsValid() {
+ 		emit(stepMsg{done: true, label: "Interface", summary: fmt.Sprintf("%s (%s)", opts.iface, scanSourceIP)})
+ 	}
+-	if outer != nil {
+-		emit(stepMsg{done: true, label: "Through", summary: outer.label})
+-	}
+ 	ports := warpPorts
+ 	if opts.port != 0 {
+ 		ports = []int{opts.port}
+ 		warpPorts = ports
+ 		emit(stepMsg{done: true, label: "Port", summary: fmt.Sprintf("%d (pinned, phase 1 skipped)", opts.port)})
+ 	}
+-	if opts.sweepPorts == sweepAll {
+-		warpPorts = allWarpPorts()
+-		emit(stepMsg{done: true, label: "Ports", summary: fmt.Sprintf("sweeping all %d known ports (phase 1 skipped)", len(warpPorts))})
+-	}
+-	if opts.port == 0 && opts.sweepPorts != sweepAll {
++	if opts.port == 0 {
+ 		open, err := reachablePorts(ctx, run, ips, timeout, portProbeSample, opts.tunnelParallel, emit)
+ 		if err != nil {
+ 			emit(stepMsg{fail: true, summary: fmt.Sprintf("phase 1 failed: %v", err)})
+@@ -489,7 +295,7 @@ func runScan(ctx context.Context, opts options, run protoRun, ips []netip.Addr,
+ 	}
+ 
+ 	ports = warpPorts
+-	targets := probeTargets(run, opts.sweepPorts != "", ips, ports)
++	targets := probeTargets(run, false, ips, ports)
+ 	results := make([]endpointResult, len(targets))
+ 	pings := opts.tunPingCount
+ 	label := fmt.Sprintf("Phase 2: verifying tunnels (proto=%s)", run.name)
+@@ -503,13 +309,7 @@ func runScan(ctx context.Context, opts options, run protoRun, ips []netip.Addr,
+ 			if pings > 0 {
+ 				r.tunPing, r.loss, r.measured, r.durable = rtt, loss, true, !torn
+ 			}
+-			// Host ICMP measures the direct path, which a nested run does not take;
+-			// from inside the outer tunnel the same echo walks the real one.
+-			if outer == nil {
+-				if hrtt, pok := pingHost(ip, timeout); pok {
+-					r.epPing = hrtt
+-				}
+-			} else if hrtt, pok := outer.pingTo(ip, timeout); pok {
++			if hrtt, pok := pingHost(ip, timeout); pok {
+ 				r.epPing = hrtt
+ 			}
+ 			found := foundMsg{endpoint: endpoint, epPing: r.epPing, tunPing: r.tunPing, loss: r.loss, measured: r.measured, torn: !r.durable}
+diff --git a/mini_conf.go b/mini_conf.go
+new file mode 100644
+index 0000000..a170483
+--- /dev/null
++++ b/mini_conf.go
+@@ -0,0 +1,48 @@
++package main
++
++import (
++	"fmt"
++	"os"
++	"strings"
++)
++
++const confStdout = "-"
++
++func renderConf(o options, endpoint string, run protoRun) string {
++	var out strings.Builder
++	fmt.Fprintln(&out, "[Interface]")
++	fmt.Fprintf(&out, "Address = %s/32, %s/128\n", warpAddress, warpAddressV6)
++	fmt.Fprintf(&out, "PrivateKey = %s\n", warpPrivateKey)
++	if !o.noDNS {
++		fmt.Fprintln(&out, "DNS = 1.1.1.1, 1.0.0.1")
++	}
++	if o.mtu > 0 {
++		fmt.Fprintf(&out, "MTU = %d\n", o.mtu)
++	}
++	if o.tableOff {
++		fmt.Fprintln(&out, "Table = off")
++	}
++	if run.isAWG() {
++		fmt.Fprintf(&out, "Jc = %d\n", awgJc)
++		fmt.Fprintf(&out, "Jmin = %d\n", awgJmin)
++		fmt.Fprintf(&out, "Jmax = %d\n", awgJmax)
++		if awgI1 != "" {
++			fmt.Fprintf(&out, "I1 = %s\n", awgI1)
++		}
++	}
++	fmt.Fprintln(&out, "\n[Peer]")
++	fmt.Fprintf(&out, "PublicKey = %s\n", warpPublicKey)
++	fmt.Fprintf(&out, "Endpoint = %s\n", endpoint)
++	fmt.Fprintln(&out, "AllowedIPs = 0.0.0.0/0, ::/0")
++	fmt.Fprintf(&out, "PersistentKeepalive = %d\n", keepalive)
++	return out.String()
++}
++
++func writeConf(o options, endpoint string, run protoRun) error {
++	data := []byte(renderConf(o, endpoint, run))
++	if o.conf == confStdout {
++		_, err := os.Stdout.Write(data)
++		return err
++	}
++	return os.WriteFile(o.conf, data, 0600)
++}
+diff --git a/mini_flags.go b/mini_flags.go
+new file mode 100644
+index 0000000..d823dee
+--- /dev/null
++++ b/mini_flags.go
+@@ -0,0 +1,275 @@
++package main
++
++import (
++	"flag"
++	"fmt"
++	"io"
++	"net/netip"
++	"os"
++	"strings"
++)
++
++type options struct {
++	tunnelParallel int
++	timeoutSec     int
++	perSubnet      int
++	tunPingCount   int
++	mtu            int
++	port           int
++	proto          string
++	output         string
++	conf           string
++	relay          string
++	iface          string
++	accountPath    string
++	genI1          string
++	i1Host         string
++	pingTarget     string
++	target         string
++	node           string
++	country        string
++	excludeNode    string
++	excludeCountry string
++	targets        []netip.Prefix
++	colos          []string
++	countries      []string
++	dropColos      []string
++	dropCountries  []string
++	freshAccount   bool
++	noReport       bool
++	tableOff       bool
++	noDNS          bool
++	i1Explicit     bool
++	tunPingCheck   bool
++	wantMeta       bool
++	plain          bool
++}
++
++type flagSpec struct{ short, long, meta, help string }
++type flagGroup struct {
++	title string
++	specs []flagSpec
++}
++
++var (
++	scanGroup = flagGroup{"Scan", []flagSpec{
++		{"", "account", "FILE", "WARP account file"},
++		{"", "interface", "NAME", "bind probes to this interface"},
++		{"", "target", "ADDR", "comma-separated IPv4 addresses or CIDRs"},
++		{"", "sample", "N", "addresses sampled per subnet"},
++		{"", "tunnel-jobs", "N", "parallel AWG tunnel workers"},
++		{"", "tun-ping-count", "N", "in-tunnel durability probes"},
++		{"", "ping-target", "ADDR", "in-tunnel ping target"},
++		{"", "country", "ISO", "required Cloudflare node countries"},
++		{"", "node", "COLO", "required Cloudflare node codes"},
++		{"", "exclude-country", "ISO", "excluded Cloudflare node countries"},
++		{"", "exclude-node", "COLO", "excluded Cloudflare node codes"},
++		{"", "conf", "FILE", "write the best native AWG configuration"},
++		{"", "output", "FILE", "write the compact endpoint report"},
++	}}
++	awgGroup = flagGroup{"AmneziaWG", []flagSpec{
++		{"", "gen-i1", "PROTO", "generate an AWG initiation packet"},
++		{"", "i1-sni", "HOST", "host imitated by the initiation packet"},
++	}}
++	plainGroup = flagGroup{"Output", []flagSpec{{"", "plain", "", "plain non-interactive output"}}}
++)
++
++const defaultTunnelJobs = 2
++
++func setupScanFlags(fs *flag.FlagSet, o *options) {
++	fs.IntVar(&o.timeoutSec, "timeout", 2, "")
++	fs.StringVar(&o.iface, "interface", "", "")
++	fs.StringVar(&o.accountPath, "account", defaultAccount, "")
++	fs.StringVar(&o.target, "target", "", "")
++	fs.IntVar(&o.tunnelParallel, "tunnel-jobs", defaultTunnelJobs, "")
++	fs.IntVar(&o.perSubnet, "sample", 5, "")
++	fs.IntVar(&o.port, "port", 0, "")
++	fs.StringVar(&o.pingTarget, "ping-target", "", "")
++	fs.StringVar(&o.proto, "proto", protoAWG, "")
++	fs.StringVar(&o.output, "output", "", "")
++	fs.StringVar(&o.output, "o", "", "")
++	fs.BoolVar(&o.noReport, "no-report", false, "")
++	fs.IntVar(&o.tunPingCount, "tun-ping-count", 0, "")
++	fs.StringVar(&o.node, "node", "", "")
++	fs.StringVar(&o.country, "country", "", "")
++	fs.StringVar(&o.excludeNode, "exclude-node", "", "")
++	fs.StringVar(&o.excludeCountry, "exclude-country", "", "")
++	fs.StringVar(&o.conf, "conf", "", "")
++	fs.BoolVar(&o.tableOff, "table-off", false, "")
++	fs.IntVar(&o.mtu, "mtu", 0, "")
++	fs.BoolVar(&o.noDNS, "no-dns", false, "")
++	fs.BoolVar(&o.plain, "plain", false, "")
++	addAWGFlags(fs, o)
++	o.wantMeta = true
++}
++
++func setupRegisterFlags(fs *flag.FlagSet, o *options) {
++	fs.IntVar(&o.timeoutSec, "timeout", 2, "")
++	fs.StringVar(&o.iface, "interface", "", "")
++	fs.StringVar(&o.accountPath, "account", defaultAccount, "")
++	fs.StringVar(&o.target, "target", "", "")
++	fs.StringVar(&o.relay, "relay", "none", "")
++	fs.BoolVar(&o.freshAccount, "fresh", false, "")
++	fs.BoolVar(&o.plain, "plain", false, "")
++	addAWGFlags(fs, o)
++	o.proto = protoAWG
++	o.perSubnet = registerSample
++}
++
++func addAWGFlags(fs *flag.FlagSet, o *options) {
++	fs.StringVar(&o.genI1, "gen-i1", "", "")
++	fs.StringVar(&o.i1Host, "i1-sni", "", "")
++	fs.IntVar(&awgJc, "jc", awgJc, "")
++	fs.IntVar(&awgJmin, "jmin", awgJmin, "")
++	fs.IntVar(&awgJmax, "jmax", awgJmax, "")
++	fs.StringVar(&awgI1, "i1", awgI1, "")
++}
++
++func applyCommonFlags(fs *flag.FlagSet, o *options) {
++	if fs.NArg() > 0 {
++		fmt.Fprintf(os.Stderr, "unexpected argument %q\n", fs.Arg(0))
++		os.Exit(2)
++	}
++	if strings.HasPrefix(o.conf, "-") && o.conf != confStdout {
++		fmt.Fprintf(os.Stderr, "-conf needs a file name, got %q\n", o.conf)
++		os.Exit(2)
++	}
++	if strings.HasPrefix(o.output, "-") {
++		fmt.Fprintf(os.Stderr, "-output needs a file name, got %q\n", o.output)
++		os.Exit(2)
++	}
++	if o.proto != protoAWG {
++		fmt.Fprintln(os.Stderr, "this build supports only -proto awg")
++		os.Exit(2)
++	}
++	if o.relay != "" && o.relay != "none" {
++		fmt.Fprintln(os.Stderr, "this build supports only -relay none")
++		os.Exit(2)
++	}
++	if o.perSubnet < 1 || o.tunnelParallel < 1 {
++		fmt.Fprintln(os.Stderr, "-sample and -tunnel-jobs must be at least 1")
++		os.Exit(2)
++	}
++	if o.port < 0 || o.port > 65535 {
++		fmt.Fprintln(os.Stderr, "-port must be between 1 and 65535")
++		os.Exit(2)
++	}
++	if o.tunPingCount > 0 {
++		o.tunPingCheck = true
++	}
++	if o.tunPingCount > 0 && o.tunPingCount < minDurabilityPings {
++		fmt.Fprintf(os.Stderr, "-tun-ping-count must be at least %d\n", minDurabilityPings)
++		os.Exit(2)
++	}
++	if awgI1 == i1Keyword {
++		awgI1 = ""
++	}
++	explicit := explicitFlags(fs)
++	o.i1Explicit = explicit["i1"] || o.genI1 != ""
++	if o.genI1 == "" && explicit["i1-sni"] {
++		fmt.Fprintln(os.Stderr, "-i1-sni needs -gen-i1")
++		os.Exit(2)
++	}
++	if o.genI1 != "" {
++		if explicit["i1"] {
++			fmt.Fprintln(os.Stderr, "-gen-i1 and -i1 cannot be combined")
++			os.Exit(2)
++		}
++		if err := regenI1(*o); err != nil {
++			fmt.Fprintln(os.Stderr, err)
++			os.Exit(2)
++		}
++	}
++	validateJunkParams()
++	if o.mtu != 0 && (o.mtu < mtuMin || o.mtu > mtuMax) {
++		fmt.Fprintf(os.Stderr, "-mtu must be between %d and %d\n", mtuMin, mtuMax)
++		os.Exit(2)
++	}
++	applyPingTarget(o)
++	applyTarget(o)
++	o.colos = splitList(o.node, "-node")
++	o.countries = splitList(o.country, "-country")
++	o.dropColos = splitList(o.excludeNode, "-exclude-node")
++	o.dropCountries = splitList(o.excludeCountry, "-exclude-country")
++}
++
++func explicitFlags(fs *flag.FlagSet) map[string]bool {
++	set := make(map[string]bool)
++	fs.Visit(func(value *flag.Flag) { set[value.Name] = true })
++	return set
++}
++
++func validateJunkParams() {
++	if awgJc < junkCountLimitMin || awgJc > junkCountLimitMax || awgJmin > awgJmax || awgJmax > tunnelMTU {
++		fmt.Fprintln(os.Stderr, "invalid AmneziaWG junk parameters")
++		os.Exit(2)
++	}
++}
++
++func applyPingTarget(o *options) {
++	if o.pingTarget == "" {
++		return
++	}
++	if !o.tunPingCheck {
++		fmt.Fprintln(os.Stderr, "-ping-target needs -tun-ping-count")
++		os.Exit(2)
++	}
++	if address, err := netip.ParseAddr(o.pingTarget); err == nil {
++		if !address.Is4() {
++			fmt.Fprintln(os.Stderr, "-ping-target must be IPv4")
++			os.Exit(2)
++		}
++		pingTarget = address.String()
++		return
++	}
++	if strings.ContainsAny(o.pingTarget, ":/ ") {
++		fmt.Fprintf(os.Stderr, "invalid -ping-target %q\n", o.pingTarget)
++		os.Exit(2)
++	}
++	pingTarget = o.pingTarget
++}
++
++func applyTarget(o *options) {
++	if o.target == "" {
++		return
++	}
++	targets, err := parseTargets(o.target)
++	if err != nil {
++		fmt.Fprintln(os.Stderr, err)
++		os.Exit(2)
++	}
++	for _, target := range targets {
++		if !target.Addr().Is4() {
++			fmt.Fprintln(os.Stderr, "this build scans IPv4 endpoints only")
++			os.Exit(2)
++		}
++	}
++	o.targets = targets
++}
++
++func splitList(value, name string) []string {
++	if value == "" {
++		return nil
++	}
++	var out []string
++	for _, item := range strings.Split(value, ",") {
++		if item = strings.ToUpper(strings.TrimSpace(item)); item != "" {
++			out = append(out, item)
++		}
++	}
++	if len(out) == 0 {
++		fmt.Fprintln(os.Stderr, name+" is empty")
++		os.Exit(2)
++	}
++	return out
++}
++
++func rootUsage(w io.Writer) {
++	fmt.Fprintln(w, "warp-scanner - WARP registration and AWG endpoint verification")
++	fmt.Fprintln(w, "usage: warp-scanner <scan|register> [options]")
++}
++
++func commandUsage(w io.Writer, cmd command, fs *flag.FlagSet) {
++	fmt.Fprintf(w, "warp-scanner %s - %s\n\n", cmd.name, cmd.brief)
++	fs.PrintDefaults()
++}
+diff --git a/mini_report.go b/mini_report.go
+new file mode 100644
+index 0000000..df8e1a9
+--- /dev/null
++++ b/mini_report.go
+@@ -0,0 +1,210 @@
++package main
++
++import (
++	"fmt"
++	"io"
++	"net/netip"
++	"os"
++	"sort"
++	"strings"
++	"time"
++)
++
++type endpointResult struct {
++	ip       netip.Addr
++	endpoint string
++	exit     metaResult
++	epPing   time.Duration
++	tunPing  time.Duration
++	loss     float32
++	measured bool
++	ok       bool
++	durable  bool
++}
++
++func (r endpointResult) working() bool  { return r.ok && r.durable }
++func (r endpointResult) tornDown() bool { return r.ok && !r.durable }
++
++func (r endpointResult) sortPing() time.Duration {
++	if r.measured {
++		return r.tunPing
++	}
++	return r.epPing
++}
++
++func latencyStr(d time.Duration) string {
++	if d <= 0 {
++		return "?"
++	}
++	if d < time.Millisecond {
++		return fmt.Sprintf("%.2fms", float64(d)/float64(time.Millisecond))
++	}
++	return fmt.Sprintf("%dms", d.Milliseconds())
++}
++
++func (r endpointResult) lossStr() string {
++	if !r.measured {
++		return "-"
++	}
++	return fmt.Sprintf("%.0f%%", r.loss*100)
++}
++
++func exitRegion(t metaResult) string {
++	if t.loc == "" {
++		return "?"
++	}
++	return t.loc
++}
++
++func exitColo(t metaResult) string {
++	if t.colo == "" {
++		return "?"
++	}
++	return t.colo
++}
++
++func exitColoLocation(t metaResult) string { return coloLocation(t) }
++
++func withFlag(flag, code string) string {
++	if flag == "" {
++		return code
++	}
++	return flag + " " + code
++}
++
++type phaseResult struct {
++	run     protoRun
++	results []endpointResult
++}
++
++func filterResults(ph phaseResult, keep func(endpointResult) bool) phaseResult {
++	kept := make([]endpointResult, 0, len(ph.results))
++	for _, result := range ph.results {
++		if keep(result) {
++			kept = append(kept, result)
++		}
++	}
++	return phaseResult{run: ph.run, results: kept}
++}
++
++func upperSet(values []string) map[string]struct{} {
++	set := make(map[string]struct{}, len(values))
++	for _, value := range values {
++		set[strings.ToUpper(value)] = struct{}{}
++	}
++	return set
++}
++
++func filterByColo(ph phaseResult, values []string, want bool) phaseResult {
++	set := upperSet(values)
++	return filterResults(ph, func(result endpointResult) bool {
++		_, exists := set[strings.ToUpper(result.exit.colo)]
++		return exists == want
++	})
++}
++
++func filterByCountry(ph phaseResult, values []string, want bool) phaseResult {
++	set := upperSet(values)
++	return filterResults(ph, func(result endpointResult) bool {
++		if result.exit.coloISO == "" {
++			return !want
++		}
++		_, exists := set[strings.ToUpper(result.exit.coloISO)]
++		return exists == want
++	})
++}
++
++func lessDuration(a, b time.Duration) bool {
++	if (a <= 0) != (b <= 0) {
++		return a > 0
++	}
++	return a < b
++}
++
++func lessByLossRTT(a, b endpointResult) bool {
++	if a.loss != b.loss {
++		return a.loss < b.loss
++	}
++	if a.sortPing() != b.sortPing() {
++		return lessDuration(a.sortPing(), b.sortPing())
++	}
++	return a.endpoint < b.endpoint
++}
++
++func sortedResults(results []endpointResult, keep func(endpointResult) bool) []endpointResult {
++	out := make([]endpointResult, 0, len(results))
++	for _, result := range results {
++		if keep(result) {
++			out = append(out, result)
++		}
++	}
++	sort.Slice(out, func(i, j int) bool { return lessByLossRTT(out[i], out[j]) })
++	return out
++}
++
++func workingSorted(results []endpointResult) []endpointResult {
++	return sortedResults(results, endpointResult.working)
++}
++
++func tornSorted(results []endpointResult) []endpointResult {
++	return sortedResults(results, endpointResult.tornDown)
++}
++
++func poolsWithHits(ph phaseResult) []netip.Prefix {
++	out := make([]netip.Prefix, 0, len(pools))
++	for _, pool := range pools {
++		for _, result := range ph.results {
++			if pool.Contains(result.ip) {
++				out = append(out, pool)
++				break
++			}
++		}
++	}
++	return out
++}
++
++func writeRows(w io.Writer, results []endpointResult, ping bool) {
++	if ping {
++		fmt.Fprintf(w, "%-22s %-13s %-9s %-6s %-10s %-6s %s\n", "ENDPOINT", "ENDPOINT PING", "TUN PING", "LOSS", "SEEN AS", "NODE", "NODE LOCATION")
++		for _, result := range results {
++			fmt.Fprintf(w, "%-22s %-13s %-9s %-6s %-10s %-6s %s\n", result.endpoint, latencyStr(result.epPing), latencyStr(result.tunPing), result.lossStr(), exitRegion(result.exit), exitColo(result.exit), exitColoLocation(result.exit))
++		}
++		return
++	}
++	fmt.Fprintf(w, "%-22s %-13s %-10s %-6s %s\n", "ENDPOINT", "ENDPOINT PING", "SEEN AS", "NODE", "NODE LOCATION")
++	for _, result := range results {
++		fmt.Fprintf(w, "%-22s %-13s %-10s %-6s %s\n", result.endpoint, latencyStr(result.epPing), exitRegion(result.exit), exitColo(result.exit), exitColoLocation(result.exit))
++	}
++}
++
++func writeFullReport(w io.Writer, ph phaseResult, ping bool) {
++	working := workingSorted(ph.results)
++	torn := tornSorted(ph.results)
++	fmt.Fprintf(w, "# WARP endpoints: %d working / %d probed\n", len(working), len(ph.results))
++	if ping {
++		fmt.Fprintf(w, "# sorted by in-tunnel loss, then in-tunnel ping\n")
++	} else {
++		fmt.Fprintf(w, "# sorted by ping to the endpoint\n")
++	}
++	if len(working) > 0 {
++		fmt.Fprintln(w)
++		writeRows(w, working, ping)
++	}
++	if len(torn) > 0 {
++		fmt.Fprintf(w, "\n# %d torn down (handshake ok, data flowed, then stopped)\n", len(torn))
++		writeRows(w, torn, ping)
++	}
++}
++
++func writeConsole(w io.Writer, ph phaseResult, ping bool) {
++	writeFullReport(w, ph, ping)
++}
++
++func writeToFile(path string, ph phaseResult, ping bool) error {
++	file, err := os.Create(path)
++	if err != nil {
++		return err
++	}
++	writeFullReport(file, ph, ping)
++	return file.Close()
++}
+diff --git a/mini_ui.go b/mini_ui.go
+new file mode 100644
+index 0000000..e940fa2
+--- /dev/null
++++ b/mini_ui.go
+@@ -0,0 +1,110 @@
++package main
++
++import (
++	"fmt"
++	"io"
++	"os"
++	"sync"
++	"sync/atomic"
++	"time"
++)
++
++type stepMsg struct {
++	label, summary string
++	done, fail     bool
++}
++
++type barBeginMsg struct {
++	label string
++	total int
++}
++
++type probedMsg struct{}
++
++type foundMsg struct {
++	endpoint string
++	epPing   time.Duration
++	tunPing  time.Duration
++	loss     float32
++	measured bool
++	exit     string
++	colo     string
++	torn     bool
++}
++
++type barEndMsg struct{ label, summary string }
++type doneMsg struct{}
++type emitter func(any)
++
++var (
++	plainNodes sync.Map
++	plainOut   io.Writer = os.Stderr
++	plainTotal atomic.Int64
++	plainStep  atomic.Int64
++	plainDone  atomic.Int64
++)
++
++const plainProgressSteps = 10
++
++func plainEmit(msg any) {
++	switch m := msg.(type) {
++	case stepMsg:
++		switch {
++		case m.fail:
++			fmt.Fprintln(plainOut, m.summary)
++		case m.done:
++			fmt.Fprintf(plainOut, "%s: %s\n", m.label, m.summary)
++		default:
++			fmt.Fprintln(plainOut, m.label+"...")
++		}
++	case barBeginMsg:
++		plainTotal.Store(int64(m.total))
++		plainStep.Store(int64(max(1, m.total/plainProgressSteps)))
++		plainDone.Store(0)
++		fmt.Fprintf(plainOut, "%s: %d...\n", m.label, m.total)
++	case probedMsg:
++		step, total := plainStep.Load(), plainTotal.Load()
++		if step == 0 {
++			return
++		}
++		if done := plainDone.Add(1); done%step == 0 && done < total {
++			fmt.Fprintf(plainOut, "  %d/%d\n", done, total)
++		}
++	case foundMsg:
++		if m.exit == "" || m.torn {
++			return
++		}
++		if _, seen := plainNodes.LoadOrStore(m.exit+" "+m.colo, true); !seen {
++			fmt.Fprintf(plainOut, "  node: %s %s (%s)\n", m.exit, m.colo, m.endpoint)
++		}
++	case barEndMsg:
++		fmt.Fprintf(plainOut, "%s: %s\n", m.label, m.summary)
++	}
++}
++
++type palette struct{}
++
++func (palette) title(s string) string  { return s }
++func (palette) ok(s string) string     { return s }
++func (palette) fail(s string) string   { return s }
++func (palette) dim(s string) string    { return s }
++func (palette) warn(s string) string   { return s }
++func (palette) accent(s string) string { return s }
++func (palette) addr(s string) string   { return s }
++
++var errPal palette
++
++func i1Note() string { return i1NoteFor(awgI1, genI1Label) }
++
++func i1NoteFor(packet, label string) string {
++	if label != "" {
++		return label
++	}
++	if packet == "" {
++		return "no I1"
++	}
++	if packet == i1Default {
++		return "built-in I1"
++	}
++	return "custom I1"
++}
+diff --git a/nest.go b/nest.go
+index ec9bb2b..dd5497d 100644
+--- a/nest.go
++++ b/nest.go
+@@ -1,3 +1,5 @@
++//go:build warpscout_full
++
+ package main
+ 
+ import (
+diff --git a/register.go b/register.go
+index 7bc54ec..7cff14f 100644
+--- a/register.go
++++ b/register.go
+@@ -12,7 +12,6 @@ import (
+ 	"net"
+ 	"net/http"
+ 	"net/netip"
+-	"net/url"
+ 	"os"
+ 	"strings"
+ 	"time"
+@@ -20,7 +19,6 @@ import (
+ 	"golang.org/x/crypto/curve25519"
+ 
+ 	"github.com/amnezia-vpn/amneziawg-go/tun/netstack"
+-	"github.com/charmbracelet/bubbles/progress"
+ )
+ 
+ const (
+@@ -30,21 +28,18 @@ const (
+ 	cfClientVersion = "a-6.11-2223"
+ 	cfUserAgent     = "okhttp/3.12.1"
+ 	defaultAccount  = "warpscout-account.json"
+-	defaultRelay    = "https://edge-client-api.vercel.app"
+ 	apiReachTimeout = 3 * time.Second
+ 	registerTimeout = 15 * time.Second
+-	relayTimeout    = 45 * time.Second
+ 	regTunnelMSS    = 1200
+ )
+ 
+ type account struct {
+-	ID            string   `json:"id"`
+-	Token         string   `json:"token"`
+-	PrivateKey    string   `json:"private_key"`
+-	PeerPublicKey string   `json:"peer_public_key"`
+-	IPv4          string   `json:"ipv4,omitempty"`
+-	IPv6          string   `json:"ipv6,omitempty"`
+-	Outer         *account `json:"outer,omitempty"`
++	ID            string `json:"id"`
++	Token         string `json:"token"`
++	PrivateKey    string `json:"private_key"`
++	PeerPublicKey string `json:"peer_public_key"`
++	IPv4          string `json:"ipv4,omitempty"`
++	IPv6          string `json:"ipv6,omitempty"`
+ }
+ 
+ func generateKeypair() (privB64, pubB64 string, err error) {
+@@ -110,7 +105,6 @@ func applyAccount(a account) {
+ 	if a.IPv6 != "" {
+ 		warpAddressV6 = a.IPv6
+ 	}
+-	outerAcct = a.Outer
+ }
+ 
+ type regResp struct {
+@@ -199,19 +193,6 @@ func mintAccount(ctx context.Context, client *http.Client, existing account) (ac
+ 	return mintWGAccount(ctx, client, existing)
+ }
+ 
+-func mintOuter(ctx context.Context, client *http.Client, existing *account) *account {
+-	var prev account
+-	if existing != nil {
+-		prev = *existing
+-	}
+-	o, err := mintWGAccount(ctx, client, prev)
+-	if err == nil {
+-		return &o
+-	}
+-	fmt.Fprintln(os.Stderr, errPal.fail(fmt.Sprintf("outer device registration failed (%v) - \"-through\" will not work", err)))
+-	return existing
+-}
+-
+ func mintWGAccount(ctx context.Context, client *http.Client, existing account) (account, error) {
+ 	if existing.ID == "" || existing.Token == "" {
+ 		return registerWARP(ctx, client)
+@@ -274,7 +255,7 @@ func apiReachable(client *http.Client) bool {
+ 	return true
+ }
+ 
+-func regTransport(proxy *url.URL) *http.Transport {
++func regTransport() *http.Transport {
+ 	d := &net.Dialer{}
+ 	t := &http.Transport{DialContext: d.DialContext}
+ 	if scanInterface != "" {
+@@ -289,70 +270,9 @@ func regTransport(proxy *url.URL) *http.Transport {
+ 			return d.DialContext(ctx, network, addr)
+ 		}
+ 	}
+-	if proxy != nil {
+-		t.Proxy = http.ProxyURL(proxy)
+-	}
+ 	return t
+ }
+ 
+-func proxyClient(proxyURL string) (*http.Client, error) {
+-	u, err := url.Parse(proxyURL)
+-	if err != nil {
+-		return nil, fmt.Errorf("invalid -proxy %q: %w", proxyURL, err)
+-	}
+-	return &http.Client{
+-		Timeout:   registerTimeout,
+-		Transport: regTransport(u),
+-	}, nil
+-}
+-
+-type relayTripper struct {
+-	base *url.URL
+-	rt   http.RoundTripper
+-}
+-
+-func (t relayTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+-	r := req.Clone(req.Context())
+-	r.URL.Scheme, r.URL.Host = t.base.Scheme, t.base.Host
+-	r.URL.Path = strings.TrimSuffix(t.base.Path, "/") + req.URL.Path
+-	r.Host = ""
+-	// The relay runs on fetch(), which gunzips the body but forwards the
+-	// Content-Encoding header as it stands - so a transport that asked for gzip
+-	// then tries to inflate plain JSON and dies with "gzip: invalid header".
+-	r.Header.Set("Accept-Encoding", "identity")
+-	return t.rt.RoundTrip(r)
+-}
+-
+-const relayOff = "none"
+-
+-func applyRelay(o *options) error {
+-	if o.relay == relayOff {
+-		o.relay = ""
+-		return nil
+-	}
+-	_, err := parseRelayURL(o.relay)
+-	return err
+-}
+-
+-func relayClient(relayURL string) (*http.Client, error) {
+-	u, err := parseRelayURL(relayURL)
+-	if err != nil {
+-		return nil, err
+-	}
+-	return &http.Client{
+-		Timeout:   relayTimeout,
+-		Transport: relayTripper{base: u, rt: regTransport(nil)},
+-	}, nil
+-}
+-
+-func parseRelayURL(relayURL string) (*url.URL, error) {
+-	u, err := url.Parse(relayURL)
+-	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+-		return nil, fmt.Errorf("invalid -relay %q: want an http(s) URL (or \"none\" to disable)", relayURL)
+-	}
+-	return u, nil
+-}
+-
+ func resolveIPv4(host string) (string, error) {
+ 	ips, err := net.LookupHost(host)
+ 	if err != nil {
+@@ -392,60 +312,38 @@ const tunnelDiscoverySample = 64
+ const tunnelDiscoveryBudget = 40 * time.Second
+ 
+ func obtainAccount(ctx context.Context, o options, ips []netip.Addr, timeout time.Duration, existing account) (account, error) {
+-	if o.proxy != "" {
+-		c, err := proxyClient(o.proxy)
+-		if err != nil {
+-			return account{}, err
+-		}
+-		return mintAccount(ctx, c, existing)
+-	}
+-
+ 	fmt.Fprintln(os.Stderr, errPal.dim("Checking Cloudflare API availability..."))
+-	direct := &http.Client{Timeout: registerTimeout, Transport: regTransport(nil)}
++	direct := &http.Client{Timeout: registerTimeout, Transport: regTransport()}
+ 	if apiReachable(direct) {
+ 		return mintAccount(ctx, direct, existing)
+ 	}
+ 
+ 	fmt.Fprintf(os.Stderr, "\n%s\n\n", errPal.fail("API unreachable directly"))
+ 
+-	if o.relay != "" {
+-		fmt.Fprintln(os.Stderr, errPal.dim(fmt.Sprintf("Registering through the relay (%s)...", o.relay)))
+-		c, err := relayClient(o.relay)
+-		if err != nil {
+-			return account{}, err
+-		}
+-		a, err := mintAccount(ctx, c, existing)
+-		if err == nil {
+-			return a, nil
+-		}
+-		fmt.Fprintln(os.Stderr, errPal.fail(fmt.Sprintf("  relay: %v", err)))
+-	}
+-
+-	fmt.Fprintln(os.Stderr, errPal.dim("Registering through a WARP tunnel (pass -proxy to use a proxy instead)"))
++	fmt.Fprintln(os.Stderr, errPal.dim("Registering through an AmneziaWG tunnel"))
+ 
+ 	sampled := sampleAddrs(ips, tunnelDiscoverySample)
+ 	origI1, origLabel := awgI1, genI1Label
+ 	var lastErr error
+-	for _, p := range []protoRun{{kindAWG, protoAWG}, {kindWG, protoWG}} {
+-		for _, c := range regI1Candidates(p, o, origI1, origLabel) {
+-			// newTunnel bakes the globals into the UAPI config, so set them first.
+-			awgI1, genI1Label = c.chain, c.label
+-			label := p.name
+-			if p.isAWG() && !o.i1Explicit {
+-				label += fmt.Sprintf(" (%s)", i1NoteFor(c.chain, c.label))
+-			}
+-			onProbe := discoveryProgress(label, len(sampled), usePlainOutput(o))
+-			a, err := registerViaTunnel(ctx, p, sampled, timeout, onProbe, existing)
+-			if onProbe != nil {
+-				fmt.Fprintln(os.Stderr)
+-			}
+-			if err == nil {
+-				reportRegI1(origI1)
+-				return a, nil
+-			}
+-			fmt.Fprintln(os.Stderr, errPal.fail(fmt.Sprintf("  %s: %v", label, err)))
+-			lastErr = err
++	p := protoRun{kindAWG, protoAWG}
++	for _, c := range regI1Candidates(p, o, origI1, origLabel) {
++		// newTunnel bakes the globals into the UAPI config, so set them first.
++		awgI1, genI1Label = c.chain, c.label
++		label := p.name
++		if p.isAWG() && !o.i1Explicit {
++			label += fmt.Sprintf(" (%s)", i1NoteFor(c.chain, c.label))
++		}
++		onProbe := discoveryProgress(label, len(sampled), usePlainOutput(o))
++		a, err := registerViaTunnel(ctx, p, sampled, timeout, onProbe, existing)
++		if onProbe != nil {
++			fmt.Fprintln(os.Stderr)
+ 		}
++		if err == nil {
++			reportRegI1(origI1)
++			return a, nil
++		}
++		fmt.Fprintln(os.Stderr, errPal.fail(fmt.Sprintf("  %s: %v", label, err)))
++		lastErr = err
+ 	}
+ 	awgI1, genI1Label = origI1, origLabel
+ 	return account{}, lastErr
+@@ -456,7 +354,7 @@ type i1Candidate struct{ chain, label string }
+ // Only awg carries an I1, and an explicit -i1/-gen-i1 is the user's choice - the
+ // fallback sweep only replaces the default probe when DPI drops it.
+ func regI1Candidates(run protoRun, o options, curChain, curLabel string) []i1Candidate {
+-	if !run.isAWG() || o.i1Explicit {
++	if o.i1Explicit {
+ 		return []i1Candidate{{curChain, curLabel}}
+ 	}
+ 	cands := []i1Candidate{{i1Default, ""}}
+@@ -476,20 +374,10 @@ func reportRegI1(origI1 string) {
+ 	fmt.Fprintln(os.Stderr, errPal.dim(fmt.Sprintf("  reuse it later with: -i1 %q", awgI1)))
+ }
+ 
+-const discoveryBarWidth = 28
+-
+-// A redrawing bar needs a terminal, so plain mode prints one static line and
+-// returns no callback.
+-func discoveryProgress(what string, total int, plain bool) func(probed int) {
++func discoveryProgress(what string, total int, _ bool) func(probed int) {
+ 	label := fmt.Sprintf("probing %s endpoints", what)
+-	if plain {
+-		fmt.Fprintf(os.Stderr, "  %s...\n", label)
+-		return nil
+-	}
+-	bar := progress.New(progress.WithDefaultGradient(), progress.WithWidth(discoveryBarWidth))
+-	return func(probed int) {
+-		fmt.Fprintf(os.Stderr, "\r\033[K  %s %s", label, bar.ViewAs(float64(probed)/float64(total)))
+-	}
++	fmt.Fprintf(os.Stderr, "  %s (%d)...\n", label, total)
++	return nil
+ }
+ 
+ // The handshake is the only reachability test that survives the DPI which
+diff --git a/report.go b/report.go
+index 3a34387..ec0fff7 100644
+--- a/report.go
++++ b/report.go
+@@ -1,3 +1,5 @@
++//go:build warpscout_full
++
+ package main
+ 
+ import (
+diff --git a/socks.go b/socks.go
+index 5a89f1c..057c954 100644
+--- a/socks.go
++++ b/socks.go
+@@ -1,3 +1,5 @@
++//go:build warpscout_full
++
+ package main
+ 
+ import (
+diff --git a/tui.go b/tui.go
+index f3c8ea5..6f0d496 100644
+--- a/tui.go
++++ b/tui.go
+@@ -1,3 +1,5 @@
++//go:build warpscout_full
++
+ package main
+ 
+ import (
+diff --git a/tunnel.go b/tunnel.go
+index cc1afac..6c36b31 100644
+--- a/tunnel.go
++++ b/tunnel.go
+@@ -48,7 +48,10 @@ type tunnel interface {
+ }
+ 
+ func newTunnel(run protoRun) (tunnel, error) {
+-	return newWGTunnel(run.isAWG())
++	if !run.isAWG() {
++		return nil, fmt.Errorf("only AmneziaWG is supported")
++	}
++	return newWGTunnel(true)
+ }
+ 
+ type wgTunnel struct {
+@@ -62,14 +65,10 @@ func newWGTunnel(awg bool) (*wgTunnel, error) {
+ 		return nil, err
+ 	}
+ 
+-	mtu := tunnelMTU
+-	if outer != nil {
+-		mtu = tunnelMTU - nestedOverhead
+-	}
+ 	tunDev, stack, err := newIPStack([]netip.Addr{
+ 		netip.MustParseAddr(warpAddress),
+ 		netip.MustParseAddr(warpAddressV6),
+-	}, mtu)
++	}, tunnelMTU)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+@@ -78,9 +77,6 @@ func newWGTunnel(awg bool) (*wgTunnel, error) {
+ 	// measured as 96% of the live heap, and the whole reason the memory limit
+ 	// costs CPU. A scan pushes a trickle of packets, so the batch buys nothing.
+ 	bind := conn.Bind(newDeviceBind(scanInterface))
+-	if outer != nil {
+-		bind = newTunnelBind(outer)
+-	}
+ 	dev := device.NewDevice(tunDev, bind, device.NewLogger(device.LogLevelSilent, ""))
+ 
+ 	if err := dev.IpcSet(base); err != nil {
+diff --git a/ui.go b/ui.go
+index 63bb496..d0e2fd6 100644
+--- a/ui.go
++++ b/ui.go
+@@ -1,3 +1,5 @@
++//go:build warpscout_full
++
+ package main
+ 
+ import (
+diff --git a/version.go b/version.go
+index f719c8f..8afc0d5 100644
+--- a/version.go
++++ b/version.go
+@@ -1,3 +1,5 @@
++//go:build warpscout_full
++
+ package main
+ 
+ import (
+diff --git a/wgconf.go b/wgconf.go
+index 7da140a..615a022 100644
+--- a/wgconf.go
++++ b/wgconf.go
+@@ -1,3 +1,5 @@
++//go:build warpscout_full
++
+ package main
+ 
+ import (
