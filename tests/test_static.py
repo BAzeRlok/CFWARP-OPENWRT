@@ -337,6 +337,14 @@ PersistentKeepalive = 25
         self.assertIn('RELEASE_TAG="v4.0.1"', installer)
         self.assertIn('uci set warp.main.sni="$MASKING_SNI"', installer)
 
+    def test_region_probe_prepares_apk_destination(self):
+        probe = (ROOT / "tools/test-direct-regions.sh").read_text(encoding="utf-8")
+        self.assertIn('mkdir "$temp_dir/root"', probe)
+        self.assertLess(
+            probe.index('mkdir "$temp_dir/root"'),
+            probe.index('apk --allow-untrusted extract'),
+        )
+
     def test_temporary_scanner_checksums_match_release_manifest(self):
         manager = MANAGER.read_text(encoding="utf-8")
         manifest = (ROOT / "release/SHA256SUMS").read_text(encoding="utf-8")

@@ -129,6 +129,7 @@ package="warp-warpscout-$SCOUT_VERSION-$architecture.apk"
 download "$RELEASE_URL/$package" "$temp_dir/$package"
 actual_sha=$(sha256sum "$temp_dir/$package" | awk '{ print $1 }')
 [ "$actual_sha" = "$scout_sha" ] || die 'не совпала SHA-256 временного сканера'
+mkdir "$temp_dir/root" || die 'не удалось создать каталог распаковки сканера'
 apk --allow-untrusted extract --destination "$temp_dir/root" "$temp_dir/$package" >/dev/null
 scout="$temp_dir/root/usr/libexec/warp-warpscout"
 [ -x "$scout" ] || die 'в APK не найден исполняемый файл WARPSCOUT'
