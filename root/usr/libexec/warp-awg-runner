@@ -13,6 +13,10 @@ IP_BIN="${WARP_IP_BIN:-/sbin/ip}"
 UCI_BIN="${WARP_UCI_BIN:-/sbin/uci}"
 UBUS_BIN="${WARP_UBUS_BIN:-/bin/ubus}"
 
+if [ -z "${WARP_IP_BIN+x}" ] && [ ! -x "$IP_BIN" ]; then
+	IP_BIN=$(command -v ip 2>/dev/null || true)
+fi
+
 child=
 route_endpoint=
 route_device=

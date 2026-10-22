@@ -4,10 +4,10 @@ set -eu
 umask 077
 
 REPOSITORY="BAzeRlok/CFWARP-OPENWRT"
-RELEASE_TAG="v4.0.0"
+RELEASE_TAG="v4.0.1"
 RELEASE_URL="https://github.com/$REPOSITORY/releases/download/$RELEASE_TAG"
-LUCI_PACKAGE="luci-app-warp-4.0.0-r1.apk"
-I18N_PACKAGE="luci-i18n-warp-ru-4.0.0.apk"
+LUCI_PACKAGE="luci-app-warp-4.0.1-r1.apk"
+I18N_PACKAGE="luci-i18n-warp-ru-4.0.1.apk"
 SNI_SET="${WARP_SNI+x}"
 NODE_COUNTRIES_SET="${WARP_NODE_COUNTRIES+x}"
 NODES_SET="${WARP_NODES+x}"

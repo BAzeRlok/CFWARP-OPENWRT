@@ -192,6 +192,10 @@ PersistentKeepalive = 25
         self.assertIn("ensure_scout()", manager)
         self.assertIn("scout_integrity_failed", manager)
         self.assertIn("warp-warpscout-$SCOUT_VERSION-$architecture.apk", manager)
+        self.assertIn("command -v apk", manager)
+        self.assertIn("command -v sha256sum", manager)
+        self.assertIn("command -v ip", manager)
+        self.assertIn("Missing executable or file", manager)
         self.assertIn("--proto awg", manager)
         self.assertIn("--gen-i1 quic", manager)
         self.assertIn('--tunnel-jobs "$SCOUT_JOBS"', manager)
@@ -322,14 +326,14 @@ PersistentKeepalive = 25
     def test_installer_selects_supported_arm64_packages(self):
         installer = (ROOT / "install.sh").read_text(encoding="utf-8")
         self.assertIn("aarch64|aarch64_cortex-a53)", installer)
-        self.assertIn('LUCI_PACKAGE="luci-app-warp-4.0.0-r1.apk"', installer)
+        self.assertIn('LUCI_PACKAGE="luci-app-warp-4.0.1-r1.apk"', installer)
         self.assertIn('AWG_PACKAGE="warp-awg-3.1.20260828-r3-$ARCH.apk"', installer)
         self.assertNotIn('SCOUT_PACKAGE=', installer)
         self.assertIn("apk del warp-warpscout", installer)
         self.assertIn('result=$(/usr/libexec/warp-manager enable)', installer)
         self.assertIn("DISTRIB_ARCH", installer)
         self.assertIn("OPENWRT_ARCH", installer)
-        self.assertIn('RELEASE_TAG="v4.0.0"', installer)
+        self.assertIn('RELEASE_TAG="v4.0.1"', installer)
         self.assertIn('uci set warp.main.sni="$MASKING_SNI"', installer)
 
     def test_temporary_scanner_checksums_match_release_manifest(self):

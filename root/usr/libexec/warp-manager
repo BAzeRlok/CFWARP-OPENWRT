@@ -29,10 +29,11 @@ PING_BIN="${WARP_PING_BIN:-/bin/ping}"
 CURL_BIN="${WARP_CURL_BIN:-/usr/bin/curl}"
 APK_BIN="${WARP_APK_BIN:-/sbin/apk}"
 SHA256_BIN="${WARP_SHA256_BIN:-/usr/bin/sha256sum}"
+IP_BIN="${WARP_IP_BIN:-/sbin/ip}"
 SCOUT_JOBS="${WARP_SCOUT_JOBS:-2}"
 SCOUT_FAST_TARGETS='162.159.192.0/24,188.114.96.0/24,188.114.97.0/24'
 SCOUT_PING_TARGET='8.8.8.8'
-SCOUT_RELEASE_TAG='v4.0.0'
+SCOUT_RELEASE_TAG='v4.0.1'
 SCOUT_RELEASE_URL="https://github.com/BAzeRlok/CFWARP-OPENWRT/releases/download/$SCOUT_RELEASE_TAG"
 SCOUT_VERSION='0.16.0-r1'
 SCOUT_SHA_AARCH64='d852382a566dbe939ff06055738dfa0a894dd323929bfc38a32e620f38b45cd7'
@@ -52,6 +53,21 @@ config_swapped=0
 STOP_WATCHDOG=1
 START_WATCHDOG=1
 RUNTIME_START_ERROR=interface_up_failed
+
+# OpenWrt images may place apk, BusyBox applets and iproute2 commands in
+# different prefixes. Explicit WARP_* overrides remain authoritative.
+if [ -z "${WARP_APK_BIN+x}" ] && [ ! -x "$APK_BIN" ]; then
+	APK_BIN=$(command -v apk 2>/dev/null || true)
+fi
+if [ -z "${WARP_SHA256_BIN+x}" ] && [ ! -x "$SHA256_BIN" ]; then
+	SHA256_BIN=$(command -v sha256sum 2>/dev/null || true)
+fi
+if [ -z "${WARP_IP_BIN+x}" ] && [ ! -x "$IP_BIN" ]; then
+	IP_BIN=$(command -v ip 2>/dev/null || true)
+fi
+if [ -z "${WARP_CURL_BIN+x}" ] && [ ! -x "$CURL_BIN" ]; then
+	CURL_BIN=$(command -v curl 2>/dev/null || true)
+fi
 
 cleanup() {
 	[ -z "$temp_batch" ] || rm -f -- "$temp_batch"
@@ -94,6 +110,17 @@ emit_success() {
 	exit 0
 }
 
+dependency_missing() {
+	missing=${1:-unknown}
+	mkdir -p "$STATE_DIR" 2>/dev/null || true
+	chmod 700 "$STATE_DIR" 2>/dev/null || true
+	printf '[%s] Missing executable or file: %s\n' \
+		"$(date -u '+%Y-%m-%d %H:%M:%S UTC' 2>/dev/null || printf unknown)" \
+		"$missing" >>"$BACKEND_LOG" 2>/dev/null || true
+	chmod 600 "$BACKEND_LOG" 2>/dev/null || true
+	emit_error 'dependency_missing'
+}
+
 acquire_lock() {
 	lock_parent=${LOCK_DIR%/*}
 	[ "$lock_parent" = "$LOCK_DIR" ] || mkdir -p "$lock_parent" 2>/dev/null || emit_error 'lock_failed'
@@ -117,8 +144,8 @@ acquire_lock() {
 require_dependencies() {
 	for path in "$UCI_BIN" "$UBUS_BIN" "$JSONFILTER_BIN" "$AWG_GO_BIN" \
 		"$AWG_CTL_BIN" "$API_BIN" "$IFUP_BIN" "$IFDOWN_BIN" "$SERVICE_INIT" \
-		"$WATCHDOG_INIT" "$PING_BIN" "$CURL_BIN" /sbin/ip; do
-		[ -x "$path" ] || emit_error 'dependency_missing'
+		"$WATCHDOG_INIT" "$PING_BIN" "$CURL_BIN" "$IP_BIN"; do
+		[ -x "$path" ] || dependency_missing "$path"
 	done
 	[ -r /etc/ssl/certs/ca-certificates.crt ] || [ -r /etc/ssl/cert.pem ] || emit_error 'ca_bundle_missing'
 	[ -c /dev/net/tun ] || emit_error 'tun_unavailable'
@@ -137,14 +164,15 @@ detect_architecture() {
 
 ensure_scout() {
 	if [ -n "$SCOUT_BIN" ]; then
-		[ -x "$SCOUT_BIN" ] || emit_error 'dependency_missing'
+		[ -x "$SCOUT_BIN" ] || dependency_missing "$SCOUT_BIN"
 		return
 	fi
 	if [ -x "$SCOUT_INSTALLED_BIN" ]; then
 		SCOUT_BIN=$SCOUT_INSTALLED_BIN
 		return
 	fi
-	[ -x "$APK_BIN" ] && [ -x "$SHA256_BIN" ] || emit_error 'dependency_missing'
+	[ -x "$APK_BIN" ] || dependency_missing 'apk'
+	[ -x "$SHA256_BIN" ] || dependency_missing 'sha256sum'
 	architecture=$(detect_architecture)
 	case "$architecture" in
 		aarch64) scout_sha=$SCOUT_SHA_AARCH64 ;;
@@ -171,8 +199,8 @@ ensure_scout() {
 
 require_runtime_dependencies() {
 	for path in "$UCI_BIN" "$UBUS_BIN" "$JSONFILTER_BIN" "$AWG_GO_BIN" \
-		"$AWG_CTL_BIN" "$IFUP_BIN" "$SERVICE_INIT" "$PING_BIN" /sbin/ip; do
-		[ -x "$path" ] || emit_error 'dependency_missing'
+		"$AWG_CTL_BIN" "$IFUP_BIN" "$SERVICE_INIT" "$PING_BIN" "$IP_BIN"; do
+		[ -x "$path" ] || dependency_missing "$path"
 	done
 	[ -c /dev/net/tun ] || emit_error 'tun_unavailable'
 }
