@@ -23,7 +23,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$ReleaseTag = 'v4.1.0'
+$ReleaseTag = 'v4.1.1'
 $HelperVersion = '0.16.0-r2'
 $Repository = 'BAzeRlok/CFWARP-OPENWRT'
 $OfficialVersion = '3.1.0'

@@ -49,6 +49,7 @@ class PackageTests(unittest.TestCase):
             ROOT / "root/etc/init.d/warp-watchdog",
             ROOT / "install.sh",
             ROOT / "tools/test-direct-regions.sh",
+            ROOT / "tools/build-windows-client.sh",
             ROOT / "tests/router-integration.sh",
             ROOT / "tests/run.sh",
             ROOT / "tests/test_watchdog.sh",
@@ -340,20 +341,21 @@ PersistentKeepalive = 25
     def test_installer_selects_supported_arm64_packages(self):
         installer = (ROOT / "install.sh").read_text(encoding="utf-8")
         self.assertIn("aarch64|aarch64_cortex-a53)", installer)
-        self.assertIn('LUCI_PACKAGE="luci-app-warp-4.1.0-r1.apk"', installer)
+        self.assertIn('LUCI_PACKAGE="luci-app-warp-4.1.1-r1.apk"', installer)
         self.assertIn('AWG_PACKAGE="warp-awg-3.1.20260828-r3-$ARCH.apk"', installer)
         self.assertNotIn('SCOUT_PACKAGE=', installer)
         self.assertIn("apk del warp-warpscout", installer)
         self.assertIn('result=$(/usr/libexec/warp-manager enable)', installer)
         self.assertIn("DISTRIB_ARCH", installer)
         self.assertIn("OPENWRT_ARCH", installer)
-        self.assertIn('RELEASE_TAG="v4.1.0"', installer)
+        self.assertIn('RELEASE_TAG="v4.1.1"', installer)
         self.assertIn('uci set warp.main.sni="$MASKING_SNI"', installer)
 
     def test_latency_watchdog_defaults_and_windows_full_tunnel(self):
         config = (ROOT / "root/etc/config/warp").read_text(encoding="utf-8")
         frontend = FRONTEND.read_text(encoding="utf-8")
         windows = (ROOT / "windows/warp.ps1").read_text(encoding="utf-8")
+        launcher = (ROOT / "windows/main_windows.go").read_text(encoding="utf-8")
         for setting in [
             "option latency_watchdog '1'",
             "option latency_threshold '250'",
@@ -368,6 +370,11 @@ PersistentKeepalive = 25
         self.assertIn("Get-AuthenticodeSignature", windows)
         self.assertIn("'*S-1-5-18:F'", windows)
         self.assertNotIn("__HELPER_", windows)
+        self.assertIn("//go:embed warp.ps1", launcher)
+        self.assertIn('NewProc("ShellExecuteW")', launcher)
+        build_script = (ROOT / "tools/build-windows-client.sh").read_text(encoding="utf-8")
+        self.assertIn("GOOS=windows GOARCH=amd64", build_script)
+        self.assertIn("GOOS=windows GOARCH=arm64", build_script)
         checksums = dict(
             reversed(line.split())
             for line in (ROOT / "release/SHA256SUMS").read_text(encoding="utf-8").splitlines()
@@ -379,6 +386,8 @@ PersistentKeepalive = 25
         self.assertIn(
             checksums["warp-windows-helper-0.16.0-r2-arm64.exe"], windows
         )
+        self.assertIn("warp-windows.exe", checksums)
+        self.assertIn("warp-windows-arm64.exe", checksums)
 
     def test_region_probe_prepares_apk_destination(self):
         probe = (ROOT / "tools/test-direct-regions.sh").read_text(encoding="utf-8")
