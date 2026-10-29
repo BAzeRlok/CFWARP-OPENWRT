@@ -4,7 +4,7 @@ set -eu
 umask 077
 
 REPOSITORY="BAzeRlok/CFWARP-OPENWRT"
-RELEASE_TAG="v4.0.2"
+RELEASE_TAG="v4.1.0"
 RELEASE_URL="https://github.com/$REPOSITORY/releases/download/$RELEASE_TAG"
 SCOUT_VERSION="0.16.0-r2"
 ACCOUNT_FILE="/etc/warp/awg-account.json"

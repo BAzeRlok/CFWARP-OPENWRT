@@ -44,12 +44,19 @@ WARP_UPSTREAM_INTERFACE=foreign_awg sh
   реальным трафиком и сохраняет лучший.
 - Watchdog после пяти неудачных проверок перезапускает текущий endpoint без
   сканирования и скачивания вспомогательных компонентов.
+- Контроль задержки измеряет средний ping внутри туннеля. После трёх
+  последовательных превышений порога он сравнивает текущий endpoint со свежими
+  кандидатами и переключается только если сканер выбрал другой endpoint лучшим.
+  Автоматический поиск выполняется не чаще одного раза в 30 минут.
 
 Основные настройки:
 
 - интерфейс — `warp`;
 - MTU — `1280`;
 - Persistent Keepalive — `25` секунд;
+- порог высокой задержки — `250` мс;
+- кандидатов из каждой подсети — `3`; увеличение улучшает глубину поиска, но
+  требует больше времени и временной памяти;
 - маскирующее имя — используется только в первом AWG-пакете;
 - требуемые и исключаемые страны — страны входных узлов Cloudflare;
 - требуемые и исключаемые узлы — трёхбуквенные коды, например `AMS` или `DME`;
@@ -74,7 +81,8 @@ logread -e warp-awg -e warp-watchdog -e warp
 ```
 
 В статусе отображаются endpoint, наблюдаемый узел Cloudflare и страна выхода,
-если фоновая проверка завершилась. Проверить выход вручную без изменения
+а также последнее свежее измерение задержки, если watchdog уже выполнил
+проверку. Проверить выход вручную без изменения
 основного маршрута:
 
 ```sh
@@ -125,6 +133,29 @@ free -m
 logread | grep -Ei 'warp|oom|out of memory|killed process|watchdog|panic|thermal'
 dmesg | grep -Ei 'oom|out of memory|killed process|watchdog|panic|thermal'
 ```
+
+Результат последнего автоматического сравнения endpoint:
+
+```sh
+cat /etc/warp/last_optimization 2>/dev/null
+logread -e warp-watchdog
+```
+
+## Windows
+
+Клиент Windows регистрирует отдельный WARP-профиль, выбирает AWG endpoint по
+потере пакетов и задержке и устанавливает full-tunnel-службу через официальный
+AmneziaWG for Windows. IPv4, IPv6 и DNS по умолчанию направляются через WARP.
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+Invoke-WebRequest `
+  https://raw.githubusercontent.com/BAzeRlok/CFWARP-OPENWRT/main/windows/warp.ps1 `
+  -OutFile "$env:TEMP\warp.ps1"
+& "$env:TEMP\warp.ps1" -Action Install -AcceptCloudflareTerms
+```
+
+Подробности и команды управления: [windows/README.md](windows/README.md).
 
 ## Удаление
 

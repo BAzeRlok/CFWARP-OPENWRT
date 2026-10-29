@@ -13,18 +13,61 @@ INTERVAL="${WARP_WATCHDOG_INTERVAL:-30}"
 MAX_FAILURES="${WARP_WATCHDOG_FAILURES:-5}"
 RECOVERY_PAUSE="${WARP_WATCHDOG_RECOVERY_PAUSE:-120}"
 LAST_RECOVERY="$STATE_DIR/last_recovery"
+LAST_OPTIMIZATION="$STATE_DIR/last_optimization"
+LATENCY_FILE="${WARP_LATENCY_FILE:-/tmp/warp-latency}"
+LATENCY_SAMPLES="${WARP_WATCHDOG_LATENCY_SAMPLES:-3}"
+LATENCY_FAILURES="${WARP_WATCHDOG_LATENCY_FAILURES:-3}"
+SYS_CLASS_NET="${WARP_SYS_CLASS_NET:-/sys/class/net}"
 
 failures=0
+latency_failures=0
+last_optimization=0
 last_rx=0
 
 log() {
 	logger -t warp-watchdog -- "$1"
 }
 
+valid_uint_range() {
+	value=$1
+	minimum=$2
+	maximum=$3
+	case "$value" in ''|*[!0-9]*) return 1 ;; esac
+	[ "$value" -ge "$minimum" ] && [ "$value" -le "$maximum" ]
+}
+
+latency_settings() {
+	latency_enabled=$($UCI_BIN -q get warp.main.latency_watchdog 2>/dev/null || printf '1')
+	latency_threshold=$($UCI_BIN -q get warp.main.latency_threshold 2>/dev/null || printf '250')
+	latency_cooldown=$($UCI_BIN -q get warp.main.latency_cooldown 2>/dev/null || printf '1800')
+	case "$latency_enabled" in 0|1) ;; *) latency_enabled=1 ;; esac
+	valid_uint_range "$latency_threshold" 20 5000 || latency_threshold=250
+	valid_uint_range "$latency_cooldown" 300 86400 || latency_cooldown=1800
+	valid_uint_range "$LATENCY_SAMPLES" 2 10 || LATENCY_SAMPLES=3
+	valid_uint_range "$LATENCY_FAILURES" 2 10 || LATENCY_FAILURES=3
+}
+
+measure_latency() {
+	"$PING_BIN" -4 -I "$1" -c "$LATENCY_SAMPLES" -W 2 1.1.1.1 2>/dev/null |
+		awk '
+			match($0, /time[=<][0-9.]+/) {
+				value = substr($0, RSTART, RLENGTH)
+				sub(/^time[=<]/, "", value)
+				total += value
+				count++
+			}
+			END {
+				if (count > 0) printf "%.0f %d\n", total / count, count
+			}
+		'
+}
+
 while sleep "$INTERVAL"; do
 	[ ! -e "$DISABLED_FILE" ] || {
 		failures=0
+		latency_failures=0
 		last_rx=0
+		rm -f -- "$LATENCY_FILE"
 		continue
 	}
 	[ ! -d "$LOCK_DIR" ] || continue
@@ -33,17 +76,21 @@ while sleep "$INTERVAL"; do
 	backend=$($UCI_BIN -q get warp.main.actual_backend 2>/dev/null || true)
 	if ! printf '%s' "$iface" | grep -Eq '^[A-Za-z_][A-Za-z0-9_]{0,14}$'; then
 		failures=0
+		latency_failures=0
 		last_rx=0
 		continue
 	fi
 	[ "$backend" = amneziawg ] || {
 		failures=0
+		latency_failures=0
 		last_rx=0
 		continue
 	}
+	latency_settings
 	handshake_ok=0
 	rx_before=0
-	if [ -r "/sys/class/net/$iface/tun_flags" ]; then
+	now=0
+	if [ -r "$SYS_CLASS_NET/$iface/tun_flags" ]; then
 		handshake=$($AWG_CTL_BIN get "$iface" last_handshake_time_sec 2>/dev/null || true)
 		rx_before=$($AWG_CTL_BIN get "$iface" rx_bytes 2>/dev/null || printf '0')
 		now=$(date +%s 2>/dev/null || printf '0')
@@ -56,7 +103,20 @@ while sleep "$INTERVAL"; do
 		fi
 	fi
 	ping_ok=0
-	"$PING_BIN" -4 -I "$iface" -c 2 -W 2 1.1.1.1 >/dev/null 2>&1 && ping_ok=1 || true
+	latency_ms=
+	latency_replies=0
+	measurement=$(measure_latency "$iface" || true)
+	if [ -n "$measurement" ]; then
+		latency_ms=${measurement%% *}
+		latency_replies=${measurement##* }
+		if valid_uint_range "$latency_ms" 0 60000 && valid_uint_range "$latency_replies" 1 "$LATENCY_SAMPLES"; then
+			ping_ok=1
+			printf '%s %s %s\n' "$iface" "$now" "$latency_ms" >"$LATENCY_FILE" 2>/dev/null || true
+		else
+			latency_ms=
+			latency_replies=0
+		fi
+	fi
 	rx_after=$($AWG_CTL_BIN get "$iface" rx_bytes 2>/dev/null || printf '0')
 	case "$rx_after" in ''|*[!0-9]*) rx_after=0 ;; esac
 	traffic_ok=0
@@ -65,9 +125,35 @@ while sleep "$INTERVAL"; do
 	last_rx=$rx_after
 	if [ "$handshake_ok" -eq 1 ] && { [ "$ping_ok" -eq 1 ] || [ "$traffic_ok" -eq 1 ]; }; then
 		failures=0
+		if [ "$latency_enabled" -eq 1 ] && [ -n "$latency_ms" ] && [ "$latency_ms" -gt "$latency_threshold" ]; then
+			latency_failures=$((latency_failures + 1))
+		else
+			latency_failures=0
+		fi
+		if [ "$latency_failures" -ge "$LATENCY_FAILURES" ]; then
+			case "$now" in ''|*[!0-9]*) now=0 ;; esac
+			elapsed=$((now - last_optimization))
+			if [ "$now" -gt 0 ] && [ "$elapsed" -ge "$latency_cooldown" ]; then
+				last_optimization=$now
+				stamp=$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date +%s)
+				printf '%s latency_ms=%s threshold_ms=%s endpoint_search=started\n' \
+					"$stamp" "$latency_ms" "$latency_threshold" >"$LAST_OPTIMIZATION" 2>/dev/null || true
+				chmod 600 "$LAST_OPTIMIZATION" 2>/dev/null || true
+				log "Latency stayed at ${latency_ms}ms above ${latency_threshold}ms for $latency_failures checks; comparing verified endpoints"
+				result=$($MANAGER optimize "$latency_ms" 2>&1 || true)
+				log "$result"
+				printf '%s latency_ms=%s threshold_ms=%s result=%s\n' \
+					"$stamp" "$latency_ms" "$latency_threshold" "$(printf '%s' "$result" | tr '\n' ' ')" \
+					>"$LAST_OPTIMIZATION" 2>/dev/null || true
+				latency_failures=0
+				last_rx=0
+				sleep "$RECOVERY_PAUSE"
+			fi
+		fi
 		continue
 	fi
 
+	latency_failures=0
 	failures=$((failures + 1))
 	[ "$failures" -ge "$MAX_FAILURES" ] || continue
 	mem_available=$(awk '/^MemAvailable:/ { print $2; exit }' /proc/meminfo 2>/dev/null || printf 'unknown')

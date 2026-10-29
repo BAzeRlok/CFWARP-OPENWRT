@@ -258,6 +258,42 @@ msgstr ""
 msgid "Status"
 msgstr ""
 
+msgid "%d ms"
+msgstr ""
+
+msgid "Tunnel latency"
+msgstr ""
+
+msgid "Latency watchdog"
+msgstr ""
+
+msgid "High latency threshold"
+msgstr ""
+
+msgid "Candidates per subnet"
+msgstr ""
+
+msgid "After three consistently slow checks, compares verified endpoints and switches only when another endpoint is selected as the best. Searches run at most once every 30 minutes."
+msgstr ""
+
+msgid "Average tunnel ping in milliseconds that triggers endpoint comparison."
+msgstr ""
+
+msgid "More candidates can find a faster endpoint but increase search time and temporary memory use."
+msgstr ""
+
+msgid "The latency watchdog setting is invalid."
+msgstr ""
+
+msgid "The latency threshold is invalid."
+msgstr ""
+
+msgid "The endpoint search cooldown is invalid."
+msgstr ""
+
+msgid "The latency measurement is invalid."
+msgstr ""
+
 #: htdocs/luci-static/resources/view/warp/overview.js:39
 msgid "System time is invalid. Wait for NTP synchronization and try again."
 msgstr ""

@@ -1,6 +1,6 @@
 msgid ""
 msgstr ""
-"Project-Id-Version: luci-app-warp 4.0.2\n"
+"Project-Id-Version: luci-app-warp 4.1.0\n"
 "PO-Revision-Date: 2026-10-22 00:00+0300\n"
 "Last-Translator: luci-app-warp contributors\n"
 "Language-Team: Russian\n"
@@ -276,6 +276,42 @@ msgstr "Автоматический запуск"
 #: htdocs/luci-static/resources/view/warp/overview.js:180
 msgid "Status"
 msgstr "Состояние"
+
+msgid "%d ms"
+msgstr "%d мс"
+
+msgid "Tunnel latency"
+msgstr "Задержка туннеля"
+
+msgid "Latency watchdog"
+msgstr "Контроль задержки"
+
+msgid "High latency threshold"
+msgstr "Порог высокой задержки"
+
+msgid "Candidates per subnet"
+msgstr "Кандидатов из каждой подсети"
+
+msgid "After three consistently slow checks, compares verified endpoints and switches only when another endpoint is selected as the best. Searches run at most once every 30 minutes."
+msgstr "После трёх последовательных проверок с высокой задержкой сравнивает проверенные endpoint и переключается, только если другой endpoint выбран лучшим. Поиск выполняется не чаще одного раза в 30 минут."
+
+msgid "Average tunnel ping in milliseconds that triggers endpoint comparison."
+msgstr "Средний ping через туннель в миллисекундах, при котором запускается сравнение endpoint."
+
+msgid "More candidates can find a faster endpoint but increase search time and temporary memory use."
+msgstr "Большее число кандидатов может найти более быстрый endpoint, но увеличивает время поиска и временное потребление памяти."
+
+msgid "The latency watchdog setting is invalid."
+msgstr "Некорректная настройка контроля задержки."
+
+msgid "The latency threshold is invalid."
+msgstr "Некорректный порог задержки."
+
+msgid "The endpoint search cooldown is invalid."
+msgstr "Некорректный интервал между поисками endpoint."
+
+msgid "The latency measurement is invalid."
+msgstr "Некорректное измерение задержки."
 
 #: htdocs/luci-static/resources/view/warp/overview.js:39
 msgid "System time is invalid. Wait for NTP synchronization and try again."

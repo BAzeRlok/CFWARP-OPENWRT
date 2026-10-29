@@ -69,6 +69,10 @@ const errorLabels = {
 	upstream_interface_unavailable: _('The upstream interface is unavailable.'),
 	upstream_interface_loop: _('The upstream interface would create a routing loop.'),
 	invalid_scan_sample: _('The endpoint scan size is invalid.'),
+	invalid_latency_watchdog: _('The latency watchdog setting is invalid.'),
+	invalid_latency_threshold: _('The latency threshold is invalid.'),
+	invalid_latency_cooldown: _('The endpoint search cooldown is invalid.'),
+	invalid_latency_measurement: _('The latency measurement is invalid.'),
 	no_safe_interface_name: _('No safe interface name is available.'),
 	managed_interface_missing: _('The managed interface is missing.'),
 	backend_start_failed: _('The WARP tunnel service could not be started.'),
@@ -188,6 +192,8 @@ return view.extend({
 			rows.push(_('Observed exit country'), status.seen_as);
 		if (status.upstream_interface)
 			rows.push(_('Upstream interface'), status.upstream_interface);
+		if (status.latency_ms > 0)
+			rows.push(_('Tunnel latency'), _('%d ms').format(status.latency_ms));
 		if (status.error_code)
 			rows.push(_('Last error'), errorLabels[status.error_code] || status.error_code);
 
@@ -262,6 +268,18 @@ return view.extend({
 		option.default = '25';
 		option.rmempty = false;
 
+		option = section.option(form.Flag, 'latency_watchdog', _('Latency watchdog'));
+		option.default = option.enabled;
+		option.rmempty = false;
+		option.description = _('After three consistently slow checks, compares verified endpoints and switches only when another endpoint is selected as the best. Searches run at most once every 30 minutes.');
+
+		option = section.option(form.Value, 'latency_threshold', _('High latency threshold'));
+		option.datatype = 'range(20,5000)';
+		option.default = '250';
+		option.rmempty = false;
+		option.depends('latency_watchdog', '1');
+		option.description = _('Average tunnel ping in milliseconds that triggers endpoint comparison.');
+
 		option = section.option(form.Value, 'sni', _('Masking hostname'));
 		option.placeholder = 'ozon.ru';
 		option.default = 'ozon.ru';
@@ -305,6 +323,12 @@ return view.extend({
 		option.validate = function(sectionId, value) {
 			return !value || /^[A-Za-z]{3}(,[A-Za-z]{3})*$/.test(value) ? true : _('Use comma-separated three-letter node codes, for example DME,LED.');
 		};
+
+		option = section.option(form.Value, 'scan_sample', _('Candidates per subnet'));
+		option.datatype = 'range(1,16)';
+		option.default = '3';
+		option.rmempty = false;
+		option.description = _('More candidates can find a faster endpoint but increase search time and temporary memory use.');
 
 		option = section.option(form.Value, 'upstream_interface', _('Upstream interface'));
 		option.placeholder = 'foreign_awg';

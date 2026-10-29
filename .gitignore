@@ -1,5 +1,6 @@
 # Build products are published as GitHub Release assets, not committed.
 dist/*.apk
+dist/*.exe
 dist/warp-usque-*-aarch64_cortex-a53
 
 # OpenWrt SDK and editor artifacts.

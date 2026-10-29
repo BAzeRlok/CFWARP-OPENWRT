@@ -51,6 +51,7 @@ class PackageTests(unittest.TestCase):
             ROOT / "tools/test-direct-regions.sh",
             ROOT / "tests/router-integration.sh",
             ROOT / "tests/run.sh",
+            ROOT / "tests/test_watchdog.sh",
         ]:
             subprocess.run(["sh", "-n", str(path)], check=True)
 
@@ -141,10 +142,11 @@ PersistentKeepalive = 25
         actions = re.findall(r'^\s*([a-z]+)\)\s+do_', dispatch.group("body"), re.M)
         self.assertEqual(
             actions,
-            ["register", "enable", "disable", "reconnect", "rescan", "status", "unregister", "recover"],
+            ["register", "enable", "disable", "reconnect", "rescan", "status", "unregister", "recover", "optimize"],
         )
         rpc = RPC.read_text(encoding="utf-8")
         self.assertNotIn("recover: true", rpc)
+        self.assertNotIn("optimize: true", rpc)
 
     def test_route_dns_and_firewall_safety(self):
         manager = MANAGER.read_text(encoding="utf-8")
@@ -226,6 +228,12 @@ PersistentKeepalive = 25
         self.assertIn("restarting the current endpoint", watchdog)
         self.assertIn("$MANAGER recover", watchdog)
         self.assertIn('MAX_FAILURES="${WARP_WATCHDOG_FAILURES:-5}"', watchdog)
+        self.assertIn('LATENCY_FAILURES="${WARP_WATCHDOG_LATENCY_FAILURES:-3}"', watchdog)
+        self.assertIn('$MANAGER optimize "$latency_ms"', watchdog)
+        self.assertIn('measure_latency "$iface"', watchdog)
+        self.assertIn('Latency optimization: current $OPTIMIZE_ENDPOINT', manager)
+        self.assertIn('$SCOUT_FAST_TARGETS,$current_ip/32', manager)
+        self.assertIn("'endpoint_kept'", manager)
         self.assertIn("last_rx=0", watchdog)
         self.assertNotIn('failures=$((failures + 1))\n\t\tcontinue', watchdog)
         self.assertNotIn("/etc/config/zapret", manager + init + runner)
@@ -332,15 +340,45 @@ PersistentKeepalive = 25
     def test_installer_selects_supported_arm64_packages(self):
         installer = (ROOT / "install.sh").read_text(encoding="utf-8")
         self.assertIn("aarch64|aarch64_cortex-a53)", installer)
-        self.assertIn('LUCI_PACKAGE="luci-app-warp-4.0.2-r1.apk"', installer)
+        self.assertIn('LUCI_PACKAGE="luci-app-warp-4.1.0-r1.apk"', installer)
         self.assertIn('AWG_PACKAGE="warp-awg-3.1.20260828-r3-$ARCH.apk"', installer)
         self.assertNotIn('SCOUT_PACKAGE=', installer)
         self.assertIn("apk del warp-warpscout", installer)
         self.assertIn('result=$(/usr/libexec/warp-manager enable)', installer)
         self.assertIn("DISTRIB_ARCH", installer)
         self.assertIn("OPENWRT_ARCH", installer)
-        self.assertIn('RELEASE_TAG="v4.0.2"', installer)
+        self.assertIn('RELEASE_TAG="v4.1.0"', installer)
         self.assertIn('uci set warp.main.sni="$MASKING_SNI"', installer)
+
+    def test_latency_watchdog_defaults_and_windows_full_tunnel(self):
+        config = (ROOT / "root/etc/config/warp").read_text(encoding="utf-8")
+        frontend = FRONTEND.read_text(encoding="utf-8")
+        windows = (ROOT / "windows/warp.ps1").read_text(encoding="utf-8")
+        for setting in [
+            "option latency_watchdog '1'",
+            "option latency_threshold '250'",
+            "option latency_cooldown '1800'",
+        ]:
+            self.assertIn(setting, config)
+        self.assertIn("'latency_watchdog'", frontend)
+        self.assertIn("'latency_threshold'", frontend)
+        self.assertIn("'scan_sample'", frontend)
+        self.assertIn("0\\.0\\.0\\.0/0,\\s*::/0", windows)
+        self.assertIn("AmneziaWGTunnel$warp", windows)
+        self.assertIn("Get-AuthenticodeSignature", windows)
+        self.assertIn("'*S-1-5-18:F'", windows)
+        self.assertNotIn("__HELPER_", windows)
+        checksums = dict(
+            reversed(line.split())
+            for line in (ROOT / "release/SHA256SUMS").read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        )
+        self.assertIn(
+            checksums["warp-windows-helper-0.16.0-r2-amd64.exe"], windows
+        )
+        self.assertIn(
+            checksums["warp-windows-helper-0.16.0-r2-arm64.exe"], windows
+        )
 
     def test_region_probe_prepares_apk_destination(self):
         probe = (ROOT / "tools/test-direct-regions.sh").read_text(encoding="utf-8")

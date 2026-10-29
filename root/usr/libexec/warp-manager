@@ -10,6 +10,7 @@ BACKEND_LOG="$STATE_DIR/backend.log"
 META_FILE="$STATE_DIR/endpoint-meta"
 DISABLED_FILE="$STATE_DIR/disabled"
 LAST_ERROR="$STATE_DIR/last_error"
+LATENCY_FILE="${WARP_LATENCY_FILE:-/tmp/warp-latency}"
 LOCK_DIR="${WARP_LOCK_DIR:-/var/lock/warp-manager.lock}"
 FORCE_START_FILE="${WARP_FORCE_START_FILE:-/tmp/warp-force-start}"
 
@@ -33,7 +34,7 @@ IP_BIN="${WARP_IP_BIN:-/sbin/ip}"
 SCOUT_JOBS="${WARP_SCOUT_JOBS:-2}"
 SCOUT_FAST_TARGETS='162.159.192.0/24,188.114.96.0/24,188.114.97.0/24'
 SCOUT_PING_TARGET='8.8.8.8'
-SCOUT_RELEASE_TAG='v4.0.2'
+SCOUT_RELEASE_TAG='v4.1.0'
 SCOUT_RELEASE_URL="https://github.com/BAzeRlok/CFWARP-OPENWRT/releases/download/$SCOUT_RELEASE_TAG"
 SCOUT_VERSION='0.16.0-r2'
 SCOUT_SHA_AARCH64='cb1935ca22b88bd16f3ac543edd4ba18478a41de6209bdfa08d6a8224926118e'
@@ -49,6 +50,8 @@ temp_full_config=
 temp_candidate=
 temp_old_config=
 temp_scout_dir=
+AUTO_OPTIMIZE=0
+OPTIMIZE_ENDPOINT=
 config_swapped=0
 STOP_WATCHDOG=1
 START_WATCHDOG=1
@@ -257,6 +260,9 @@ validate_settings() {
 	CFG_EXCLUDE_NODE_COUNTRIES=$(cfg_get_compat exclude_node_countries exclude_countries RU | tr '[:lower:]' '[:upper:]')
 	CFG_EXCLUDE_NODES=$(cfg_get_compat exclude_nodes '' DME | tr '[:lower:]' '[:upper:]')
 	CFG_SCAN_SAMPLE=$(cfg_get scan_sample 3)
+	CFG_LATENCY_WATCHDOG=$(cfg_get latency_watchdog 1)
+	CFG_LATENCY_THRESHOLD=$(cfg_get latency_threshold 250)
+	CFG_LATENCY_COOLDOWN=$(cfg_get latency_cooldown 1800)
 	CFG_UPSTREAM=$(cfg_get upstream_interface '')
 	CFG_ACTUAL=$(cfg_get actual_interface '')
 	CFG_STORED_BACKEND=$(cfg_get actual_backend '')
@@ -272,6 +278,9 @@ validate_settings() {
 	valid_country_list "$CFG_EXCLUDE_NODE_COUNTRIES" || emit_error 'invalid_excluded_node_countries'
 	valid_node_list "$CFG_EXCLUDE_NODES" || emit_error 'invalid_excluded_nodes'
 	valid_uint_range "$CFG_SCAN_SAMPLE" 1 256 || emit_error 'invalid_scan_sample'
+	valid_flag "$CFG_LATENCY_WATCHDOG" || emit_error 'invalid_latency_watchdog'
+	valid_uint_range "$CFG_LATENCY_THRESHOLD" 20 5000 || emit_error 'invalid_latency_threshold'
+	valid_uint_range "$CFG_LATENCY_COOLDOWN" 300 86400 || emit_error 'invalid_latency_cooldown'
 	valid_uint_range "$SCOUT_JOBS" 1 4 || emit_error 'invalid_scan_workers'
 	[ -z "$CFG_ACTUAL" ] || valid_uci_name "$CFG_ACTUAL" || emit_error 'invalid_managed_interface'
 	[ -z "$CFG_UPSTREAM" ] || valid_uci_name "$CFG_UPSTREAM" || emit_error 'invalid_upstream_interface'
@@ -480,6 +489,15 @@ accept_scanned_candidate() {
 scan_candidate() {
 	ensure_scout
 	temp_full_config="$STATE_DIR/.warpscout-conf.$$"
+	if [ "$AUTO_OPTIMIZE" -eq 1 ]; then
+		current_ip=${OPTIMIZE_ENDPOINT%:*}
+		is_ipv4_address "$current_ip" || return 1
+		optimize_targets="$SCOUT_FAST_TARGETS,$current_ip/32"
+		backend_note "Latency optimization: current $OPTIMIZE_ENDPOINT, sample $CFG_SCAN_SAMPLE, workers $SCOUT_JOBS, ping target $SCOUT_PING_TARGET"
+		run_endpoint_scan "$CFG_SCAN_SAMPLE" "$optimize_targets" || return 1
+		accept_scanned_candidate
+		return 0
+	fi
 	if [ "$CFG_SCAN_SAMPLE" -gt 1 ]; then
 		backend_note "Fast endpoint scan: core pools, sample 1, workers $SCOUT_JOBS, ping target $SCOUT_PING_TARGET"
 		if run_endpoint_scan 1 "$SCOUT_FAST_TARGETS"; then
@@ -489,14 +507,14 @@ scan_candidate() {
 		backend_note "Fast scan found no suitable endpoint; starting full scan"
 	fi
 	backend_note "Endpoint scan: sample $CFG_SCAN_SAMPLE, workers $SCOUT_JOBS, ping target $SCOUT_PING_TARGET"
-	run_endpoint_scan "$CFG_SCAN_SAMPLE" || emit_error 'endpoint_scan_failed'
+	run_endpoint_scan "$CFG_SCAN_SAMPLE" || return 1
 	accept_scanned_candidate
 }
 
 prepare_tunnel_config() {
 	rescan=$1
 	if [ "$rescan" = 1 ] || ! awg_config_valid; then
-		scan_candidate
+		scan_candidate || emit_error 'endpoint_scan_failed'
 	fi
 }
 
@@ -898,6 +916,57 @@ do_recover() {
 	emit_success 'recovered' "$ACTUAL_INTERFACE"
 }
 
+do_optimize() {
+	current_latency=${1:-}
+	valid_uint_range "$current_latency" 1 60000 || emit_error 'invalid_latency_measurement'
+	acquire_lock
+	STOP_WATCHDOG=0
+	START_WATCHDOG=0
+	require_dependencies
+	validate_settings
+	resolve_upstream_device
+	account_valid || emit_error 'invalid_awg_account'
+	awg_config_valid || emit_error 'invalid_awg_config'
+	[ -n "$CFG_ACTUAL" ] && interface_owned "$CFG_ACTUAL" || emit_error 'managed_interface_missing'
+	ACTUAL_INTERFACE=$CFG_ACTUAL
+	OPTIMIZE_ENDPOINT=$AWG_ENDPOINT
+	AUTO_OPTIMIZE=1
+	mkdir -p "$STATE_DIR" 2>/dev/null || emit_error 'state_directory_failed'
+	chmod 700 "$STATE_DIR" || emit_error 'state_directory_failed'
+	touch "$BACKEND_LOG" || emit_error 'state_write_failed'
+	chmod 600 "$BACKEND_LOG" || emit_error 'state_write_failed'
+	backend_note "Watchdog measured ${current_latency}ms; comparing the current endpoint with fresh candidates"
+	check_system_time
+	if ! scan_candidate; then
+		backend_note 'Latency optimization found no verified replacement; keeping the current endpoint'
+		emit_success 'optimization_skipped' "$ACTUAL_INTERFACE"
+	fi
+	candidate_endpoint=$(conf_value "$temp_candidate" Endpoint)
+	if [ "$candidate_endpoint" = "$OPTIMIZE_ENDPOINT" ]; then
+		backend_note "Current endpoint $OPTIMIZE_ENDPOINT remains the best verified candidate"
+		rm -f -- "$temp_candidate"
+		temp_candidate=
+		emit_success 'endpoint_kept' "$ACTUAL_INTERFACE"
+	fi
+	backend_note "Switching endpoint from $OPTIMIZE_ENDPOINT to $candidate_endpoint"
+	runtime_stop
+	if ! install_candidate_config; then
+		rollback_live_config || emit_error 'rollback_failed'
+		emit_error 'state_write_failed'
+	fi
+	if ! runtime_start; then
+		optimization_error=$RUNTIME_START_ERROR
+		runtime_stop
+		rollback_live_config || emit_error 'rollback_failed'
+		awg_config_valid || emit_error 'rollback_failed'
+		runtime_start || emit_error 'rollback_failed'
+		backend_note "Candidate failed with $optimization_error; restored the previous endpoint $OPTIMIZE_ENDPOINT"
+		emit_success 'optimization_rollback' "$ACTUAL_INTERFACE"
+	fi
+	discard_config_backup
+	emit_success 'optimized' "$ACTUAL_INTERFACE"
+}
+
 do_disable() {
 	acquire_lock
 	validate_settings
@@ -929,7 +998,7 @@ do_unregister() {
 	clear_actual_state
 	$UBUS_BIN call network reload '{}' >/dev/null 2>&1 || emit_error 'network_reload_failed'
 	rm -f -- "$ACCOUNT_FILE" "$AWG_CONFIG" "$BACKEND_LOG" "$META_FILE" "$DISABLED_FILE" "$LAST_ERROR" \
-		"$STATE_DIR/last_recovery"
+		"$STATE_DIR/last_recovery" "$STATE_DIR/last_optimization" "$LATENCY_FILE"
 	emit_success 'unregistered' ''
 }
 
@@ -944,6 +1013,7 @@ do_status() {
 	last_handshake=0
 	rx_bytes=0
 	tx_bytes=0
+	latency_ms=0
 	node=
 	seen_as=
 
@@ -984,16 +1054,33 @@ do_status() {
 	for number in "$last_handshake" "$rx_bytes" "$tx_bytes"; do
 		case "$number" in ''|*[!0-9]*) last_handshake=0; rx_bytes=0; tx_bytes=0; break ;; esac
 	done
+	if [ -r "$LATENCY_FILE" ]; then
+		latency_interface=
+		latency_time=0
+		latency_value=0
+		read -r latency_interface latency_time latency_value <"$LATENCY_FILE" || true
+		case "$latency_time:$latency_value" in
+			*[!0-9:]*) ;;
+			*)
+				now=$(date +%s 2>/dev/null || printf '0')
+				case "$now" in ''|*[!0-9]*) now=0 ;; esac
+				latency_age=$((now - latency_time))
+				if [ "$latency_interface" = "$CFG_ACTUAL" ] && [ "$latency_age" -ge 0 ] && [ "$latency_age" -le 180 ]; then
+					latency_ms=$latency_value
+				fi
+				;;
+		esac
+	fi
 	if [ -s "$LAST_ERROR" ]; then
 		error_code=$(sed -n '1p' "$LAST_ERROR")
 		[ "$state" = not_configured ] || [ "$state" = registering ] || state=error
 	fi
 	backend=
 	[ "$CFG_BACKEND" != amneziawg ] || backend=amneziawg
-	printf '{"ok":true,"state":"%s","interface":"%s","backend":"%s","registered":%s,"managed":%s,"up":%s,"endpoint":"%s","node":"%s","seen_as":"%s","upstream_interface":"%s","last_handshake":%s,"rx_bytes":%s,"tx_bytes":%s,"error_code":"%s"}\n' \
+	printf '{"ok":true,"state":"%s","interface":"%s","backend":"%s","registered":%s,"managed":%s,"up":%s,"endpoint":"%s","node":"%s","seen_as":"%s","upstream_interface":"%s","latency_ms":%s,"last_handshake":%s,"rx_bytes":%s,"tx_bytes":%s,"error_code":"%s"}\n' \
 		"$(json_escape "$state")" "$(json_escape "$CFG_ACTUAL")" "$(json_escape "$backend")" \
 		"$registered" "$managed" "$up" "$(json_escape "$endpoint")" "$(json_escape "$node")" \
-		"$(json_escape "$seen_as")" "$(json_escape "$CFG_UPSTREAM")" "$last_handshake" \
+		"$(json_escape "$seen_as")" "$(json_escape "$CFG_UPSTREAM")" "$latency_ms" "$last_handshake" \
 		"$rx_bytes" "$tx_bytes" "$(json_escape "$error_code")"
 }
 
@@ -1006,5 +1093,6 @@ case "${1:-}" in
 	status) do_status ;;
 	unregister) do_unregister ;;
 	recover) do_recover ;;
+	optimize) do_optimize "${2:-}" ;;
 	*) emit_error 'invalid_action' ;;
 esac
