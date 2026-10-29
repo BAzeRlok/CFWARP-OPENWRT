@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('Install', 'Connect', 'Disconnect', 'Reconnect', 'Rescan', 'Status', 'Uninstall')]
+    [ValidateSet('Install', 'Connect', 'Disconnect', 'Reconnect', 'Rescan', 'ApplyDNS', 'Status', 'Uninstall')]
     [string]$Action = 'Install',
 
     [switch]$AcceptCloudflareTerms,
@@ -36,6 +36,8 @@ $CandidatePath = Join-Path $StateDirectory 'warp.candidate.conf'
 $AmneziaPath = Join-Path $env:ProgramFiles 'AmneziaWG\amneziawg.exe'
 $TunnelName = 'warp'
 $ServiceName = 'AmneziaWGTunnel$warp'
+$DnsServiceName = 'WarpExternalDNS'
+$DnsConfigPath = Join-Path $StateDirectory 'dns.json'
 
 function Test-Administrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -169,6 +171,159 @@ function Add-OptionalArgument([Collections.Generic.List[string]]$Arguments, [str
     }
 }
 
+function Get-ValidatedDNS([string]$Value) {
+    $addresses = [Collections.Generic.List[string]]::new()
+    foreach ($part in $Value.Split(',')) {
+        $text = $part.Trim()
+        $address = $null
+        if ([string]::IsNullOrWhiteSpace($text) -or -not [Net.IPAddress]::TryParse($text, [ref]$address)) {
+            throw 'Укажите IP-адреса DNS-серверов через запятую.'
+        }
+        # TryParse accepts abbreviated decimal IPv4; require its unambiguous dotted form.
+        if ($address.AddressFamily -eq [Net.Sockets.AddressFamily]::InterNetwork -and $text -ne $address.ToString()) {
+            throw 'IPv4 DNS должен иметь вид 8.8.8.8.'
+        }
+        $addresses.Add($address.ToString())
+    }
+    return $addresses -join ', '
+}
+
+function Set-ConfigurationDNS([string]$Config, [string]$Value) {
+    $dns = Get-ValidatedDNS $Value
+    $lines = [Collections.Generic.List[string]]::new()
+    $inInterface = $false
+    $interfaces = 0
+    foreach ($line in [regex]::Split($Config, '\r?\n')) {
+        if ($line -match '^\s*\[([^\]]+)\]\s*$') {
+            $inInterface = $Matches[1] -eq 'Interface'
+            if ($inInterface) { $interfaces++ }
+            $lines.Add($line)
+            if ($inInterface) { $lines.Add("DNS = $dns") }
+        }
+        elseif (-not ($inInterface -and $line -match '^\s*DNS\s*=')) {
+            $lines.Add($line)
+        }
+    }
+    if ($interfaces -ne 1) { throw 'В конфигурации WARP должна быть одна секция [Interface].' }
+    $separator = "`n"
+    if ($Config.Contains("`r`n")) { $separator = "`r`n" }
+    return $lines -join $separator
+}
+
+function Stop-ExternalDNS {
+    $dnsService = Get-Service -Name $DnsServiceName -ErrorAction SilentlyContinue
+    if ($null -ne $dnsService) {
+        try {
+            if ($dnsService.Status -ne [ServiceProcess.ServiceControllerStatus]::Stopped) {
+                Stop-Service -Name $DnsServiceName
+                $dnsService.WaitForStatus([ServiceProcess.ServiceControllerStatus]::Stopped, [TimeSpan]::FromSeconds(30))
+            }
+        }
+        finally { $dnsService.Dispose() }
+    }
+}
+
+function Start-ExternalDNS {
+    if (-not (Test-Path -LiteralPath $DnsConfigPath) -or -not (Test-Path -LiteralPath $ConfigPath)) { return }
+    $dns = Get-Content -LiteralPath $DnsConfigPath -Raw | ConvertFrom-Json
+    if (-not $dns.enabled -or $dns.type -notin @('dot', 'doh')) { return }
+    $config = Get-Content -LiteralPath $ConfigPath -Raw
+    if ($config -notmatch '(?im)^\s*DNS\s*=\s*127\.0\.0\.1\s*$') { return }
+    $dnsService = Get-Service -Name $DnsServiceName -ErrorAction SilentlyContinue
+    if ($null -eq $dnsService) { throw 'Не установлена служба стороннего DNS. Примените DNS в окне WARP.' }
+    try {
+        Start-Service -Name $DnsServiceName
+        $dnsService.WaitForStatus([ServiceProcess.ServiceControllerStatus]::Running, [TimeSpan]::FromSeconds(30))
+    }
+    finally { $dnsService.Dispose() }
+}
+
+function Remove-ExternalDNS {
+    Stop-ExternalDNS
+    $dnsService = Get-Service -Name $DnsServiceName -ErrorAction SilentlyContinue
+    if ($null -eq $dnsService) { return }
+    $dnsService.Dispose()
+    & sc.exe delete $DnsServiceName | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'Не удалось удалить службу стороннего DNS.' }
+    for ($attempt = 0; $attempt -lt 40; $attempt++) {
+        $remaining = Get-Service -Name $DnsServiceName -ErrorAction SilentlyContinue
+        if ($null -eq $remaining) { return }
+        $remaining.Dispose()
+        Start-Sleep -Milliseconds 250
+    }
+    throw 'Служба стороннего DNS ещё удаляется. Закройте оснастку служб и повторите удаление.'
+}
+
+function Set-TunnelDNS {
+    if (-not (Test-Path -LiteralPath $ConfigPath)) { throw 'WARP не установлен. Сначала выполните Install.' }
+    $config = [IO.File]::ReadAllText($ConfigPath)
+    $updated = Set-ConfigurationDNS $config $DnsServers
+    $service = Get-TunnelService
+    if ($null -eq $service) { throw 'Служба WARP не установлена. Сначала выполните Install.' }
+    $wasRunning = $service.Status -eq [ServiceProcess.ServiceControllerStatus]::Running
+    $service.Dispose()
+    $dnsService = Get-Service -Name $DnsServiceName -ErrorAction SilentlyContinue
+    $dnsWasRunning = $false
+    if ($null -ne $dnsService) {
+        $dnsWasRunning = $dnsService.Status -eq [ServiceProcess.ServiceControllerStatus]::Running
+        $dnsService.Dispose()
+    }
+    $operation = [Guid]::NewGuid().ToString('N')
+    $candidate = Join-Path $StateDirectory "dns-$operation.candidate"
+    $backup = Join-Path $StateDirectory "dns-$operation.backup"
+    $replaced = $false
+    $rollbackFailed = $false
+    try {
+        [IO.File]::WriteAllText($candidate, $updated, [Text.UTF8Encoding]::new($false))
+        Protect-StateFile $candidate
+        Stop-ExternalDNS
+        Stop-Service -Name $ServiceName
+        (Get-Service -Name $ServiceName).WaitForStatus([ServiceProcess.ServiceControllerStatus]::Stopped, [TimeSpan]::FromSeconds(30))
+        [IO.File]::Replace($candidate, $ConfigPath, $backup)
+        $replaced = $true
+        Protect-StateFile $ConfigPath
+        if ($wasRunning) {
+            Start-Service -Name $ServiceName
+            (Get-Service -Name $ServiceName).WaitForStatus([ServiceProcess.ServiceControllerStatus]::Running, [TimeSpan]::FromSeconds(30))
+        }
+        # The GUI configures/starts the selected DNS service after this transaction.
+        Write-Host 'DNS конфигурации WARP обновлён без поиска endpoint.'
+    }
+    catch {
+        $originalError = $_
+        try {
+            if ($replaced) {
+                Stop-ExternalDNS
+                Stop-Service -Name $ServiceName
+                (Get-Service -Name $ServiceName).WaitForStatus([ServiceProcess.ServiceControllerStatus]::Stopped, [TimeSpan]::FromSeconds(30))
+                [IO.File]::Replace($backup, $ConfigPath, $candidate)
+            }
+            if ($wasRunning) {
+                Start-Service -Name $ServiceName
+                (Get-Service -Name $ServiceName).WaitForStatus([ServiceProcess.ServiceControllerStatus]::Running, [TimeSpan]::FromSeconds(30))
+            }
+            if ($dnsWasRunning) {
+                Start-Service -Name $DnsServiceName
+                (Get-Service -Name $DnsServiceName).WaitForStatus([ServiceProcess.ServiceControllerStatus]::Running, [TimeSpan]::FromSeconds(30))
+            }
+        }
+        catch {
+            $rollbackFailed = $true
+            $recoveryPath = $ConfigPath
+            if (Test-Path -LiteralPath $backup) { $recoveryPath = $backup }
+            throw "Не удалось применить DNS: $originalError. Ошибка восстановления: $_. Конфигурация для восстановления: $recoveryPath"
+        }
+        throw $originalError
+    }
+    finally {
+        Remove-Item -LiteralPath $candidate -Force -ErrorAction SilentlyContinue
+        # Keep the backup when rollback itself failed so the user can recover it.
+        if (-not $rollbackFailed) {
+            Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function New-WarpConfiguration {
     Remove-Item -LiteralPath $CandidatePath -Force -ErrorAction SilentlyContinue
     $arguments = [Collections.Generic.List[string]]::new()
@@ -194,20 +349,18 @@ function New-WarpConfiguration {
     if ($config -notmatch '(?m)^Address\s*=\s*' -or $config -notmatch '(?m)^AllowedIPs\s*=\s*0\.0\.0\.0/0,\s*::/0\s*$') {
         throw 'Созданная конфигурация не является full-tunnel.'
     }
-    $escapedDns = $DnsServers.Trim()
-    if ($escapedDns -notmatch '^[0-9A-Fa-f:., ]+$') {
-        throw 'Некорректный список DNS-серверов.'
-    }
-    $config = [regex]::Replace($config, '(?m)^DNS\s*=.*$', "DNS = $escapedDns")
+    $config = Set-ConfigurationDNS $config $DnsServers
     [IO.File]::WriteAllText($CandidatePath, $config, [Text.UTF8Encoding]::new($false))
     Protect-StateFile $CandidatePath
 }
 
 function Remove-TunnelService {
+    Stop-ExternalDNS
     $service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
     if ($null -eq $service) {
         return
     }
+    $service.Dispose()
     & $AmneziaPath /uninstalltunnelservice $TunnelName | Out-Null
     if ($LASTEXITCODE -ne 0) {
         throw 'Не удалось удалить прежнюю службу туннеля.'
@@ -221,16 +374,99 @@ function Remove-TunnelService {
     throw 'Прежняя служба туннеля не остановилась вовремя.'
 }
 
-function Install-TunnelConfiguration {
-    Remove-TunnelService
-    Move-Item -LiteralPath $CandidatePath -Destination $ConfigPath -Force
-    Protect-StateFile $ConfigPath
+function Install-TunnelService {
     & $AmneziaPath /installtunnelservice $ConfigPath | Out-Null
     if ($LASTEXITCODE -ne 0) {
         throw 'Не удалось установить службу WARP.'
     }
     $service = Get-Service -Name $ServiceName -ErrorAction Stop
-    $service.WaitForStatus([ServiceProcess.ServiceControllerStatus]::Running, [TimeSpan]::FromSeconds(30))
+    try {
+        $service.WaitForStatus([ServiceProcess.ServiceControllerStatus]::Running, [TimeSpan]::FromSeconds(30))
+    }
+    finally { $service.Dispose() }
+}
+
+function Install-TunnelConfiguration {
+    if (-not (Test-Path -LiteralPath $CandidatePath)) { throw 'Не найдена новая конфигурация WARP.' }
+    $hadConfig = Test-Path -LiteralPath $ConfigPath
+    $service = Get-TunnelService
+    $hadService = $null -ne $service
+    $wasRunning = $false
+    if ($hadService) {
+        $wasRunning = $service.Status -eq [ServiceProcess.ServiceControllerStatus]::Running
+        $service.Dispose()
+        if (-not $hadConfig) { throw 'Отсутствует конфигурация установленной службы WARP; восстановите warp.conf перед переустановкой.' }
+    }
+    $dnsService = Get-Service -Name $DnsServiceName -ErrorAction SilentlyContinue
+    $dnsWasRunning = $false
+    if ($null -ne $dnsService) {
+        $dnsWasRunning = $dnsService.Status -eq [ServiceProcess.ServiceControllerStatus]::Running
+        $dnsService.Dispose()
+    }
+    $backup = Join-Path $StateDirectory ('install-' + [Guid]::NewGuid().ToString('N') + '.backup')
+    $servicesChanged = $false
+    $configChanged = $false
+    $rollbackFailed = $false
+    try {
+        if ($hadConfig) {
+            [IO.File]::Copy($ConfigPath, $backup, $false)
+            Protect-StateFile $backup
+        }
+        Protect-StateFile $CandidatePath
+        $servicesChanged = $true
+        Remove-TunnelService
+        $configChanged = $true
+        if ($hadConfig) {
+            [IO.File]::Replace($CandidatePath, $ConfigPath, $backup)
+        }
+        else {
+            [IO.File]::Move($CandidatePath, $ConfigPath)
+        }
+        Protect-StateFile $ConfigPath
+        Install-TunnelService
+        # Go starts the matching DNS proxy only after configuration succeeds.
+    }
+    catch {
+        $originalError = $_
+        try {
+            if ($servicesChanged) {
+                Remove-TunnelService
+                if ($configChanged) {
+                    if ($hadConfig) {
+                        [IO.File]::Copy($backup, $ConfigPath, $true)
+                        Protect-StateFile $ConfigPath
+                    }
+                    elseif (Test-Path -LiteralPath $ConfigPath) {
+                        Remove-Item -LiteralPath $ConfigPath -Force
+                    }
+                }
+                if ($hadService) {
+                    Install-TunnelService
+                    if (-not $wasRunning) {
+                        Stop-Service -Name $ServiceName
+                        (Get-Service -Name $ServiceName).WaitForStatus([ServiceProcess.ServiceControllerStatus]::Stopped, [TimeSpan]::FromSeconds(30))
+                    }
+                }
+                if ($dnsWasRunning) {
+                    Start-Service -Name $DnsServiceName
+                    (Get-Service -Name $DnsServiceName).WaitForStatus([ServiceProcess.ServiceControllerStatus]::Running, [TimeSpan]::FromSeconds(30))
+                }
+            }
+        }
+        catch {
+            $rollbackFailed = $true
+            $recovery = 'Неполная установка; проверьте службу WARP.'
+            if ($hadConfig) { $recovery = "Сохранена прежняя конфигурация: $backup" }
+            throw "Не удалось установить туннель: $originalError. Ошибка восстановления: $_. $recovery"
+        }
+        throw $originalError
+    }
+    finally {
+        Remove-Item -LiteralPath $CandidatePath -Force -ErrorAction SilentlyContinue
+        if (-not $rollbackFailed) {
+            Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue
+        }
+    }
 }
 
 function Get-TunnelService {
@@ -268,9 +504,11 @@ switch ($Action) {
         if ($null -eq $service) { throw 'Служба WARP не установлена. Сначала выполните Install.' }
         Start-Service -Name $ServiceName
         (Get-Service -Name $ServiceName).WaitForStatus([ServiceProcess.ServiceControllerStatus]::Running, [TimeSpan]::FromSeconds(30))
+        Start-ExternalDNS
         Write-Host 'WARP подключён.'
     }
     'Disconnect' {
+        Stop-ExternalDNS
         $service = Get-TunnelService
         if ($null -ne $service) {
             Stop-Service -Name $ServiceName -Force
@@ -281,9 +519,14 @@ switch ($Action) {
     'Reconnect' {
         $service = Get-TunnelService
         if ($null -eq $service) { throw 'Служба WARP не установлена. Сначала выполните Install.' }
-        Restart-Service -Name $ServiceName -Force
+        Stop-ExternalDNS
+        Restart-Service -Name $ServiceName
         (Get-Service -Name $ServiceName).WaitForStatus([ServiceProcess.ServiceControllerStatus]::Running, [TimeSpan]::FromSeconds(30))
+        Start-ExternalDNS
         Write-Host 'WARP переподключён к текущему endpoint.'
+    }
+    'ApplyDNS' {
+        Set-TunnelDNS
     }
     'Status' {
         $service = Get-TunnelService
@@ -293,9 +536,17 @@ switch ($Action) {
         else {
             $service | Select-Object Name, Status, StartType
             Write-Host "Full-tunnel config: $ConfigPath"
+            if (Test-Path -LiteralPath $DnsConfigPath) {
+                $dns = Get-Content -LiteralPath $DnsConfigPath -Raw | ConvertFrom-Json
+                if ($dns.enabled) {
+                    Write-Host "Сторонний DNS: $($dns.type) $($dns.address)"
+                    Get-Service -Name $DnsServiceName -ErrorAction SilentlyContinue | Select-Object Name, Status, StartType
+                }
+            }
         }
     }
     'Uninstall' {
+        Remove-ExternalDNS
         if (Test-Path -LiteralPath $AmneziaPath) {
             Remove-TunnelService
         }
