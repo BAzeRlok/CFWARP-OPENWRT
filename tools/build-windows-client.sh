@@ -10,10 +10,10 @@ mkdir -p "$output_dir"
 (
 	cd "$root_dir/windows"
 	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 \
-		go build -buildvcs=false -trimpath -ldflags '-s -w -buildid=' \
+		go build -buildvcs=false -trimpath -ldflags '-s -w -buildid= -H=windowsgui' \
 		-o "$output_dir/warp-windows.exe" .
 	CGO_ENABLED=0 GOOS=windows GOARCH=arm64 \
-		go build -buildvcs=false -trimpath -ldflags '-s -w -buildid=' \
+		go build -buildvcs=false -trimpath -ldflags '-s -w -buildid= -H=windowsgui' \
 		-o "$output_dir/warp-windows-arm64.exe" .
 )
 

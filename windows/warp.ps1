@@ -22,8 +22,9 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 
-$ReleaseTag = 'v4.1.1'
+$ReleaseTag = 'v4.2.0'
 $HelperVersion = '0.16.0-r2'
 $Repository = 'BAzeRlok/CFWARP-OPENWRT'
 $OfficialVersion = '3.1.0'

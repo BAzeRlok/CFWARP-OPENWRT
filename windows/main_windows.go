@@ -3,45 +3,211 @@
 package main
 
 import (
-	"bufio"
+	"bytes"
 	_ "embed"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"unsafe"
 )
 
-const version = "4.1.1"
+const (
+	version = "4.2.0"
+
+	wsOverlappedWindow = 0x00CF0000
+	wsChild            = 0x40000000
+	wsVisible          = 0x10000000
+	wsTabStop          = 0x00010000
+	wsBorder           = 0x00800000
+	wsVScroll          = 0x00200000
+	wsClipChildren     = 0x02000000
+
+	esLeft        = 0x0000
+	esMultiline   = 0x0004
+	esAutoVScroll = 0x0040
+	esReadOnly    = 0x0800
+
+	bsPushButton    = 0x00000000
+	bsDefPushButton = 0x00000001
+
+	swShowNormal = 1
+	swShow       = 5
+
+	wmCreate      = 0x0001
+	wmSize        = 0x0005
+	wmClose       = 0x0010
+	wmDestroy     = 0x0002
+	wmCommand     = 0x0111
+	wmSetFont     = 0x0030
+	wmAppTaskDone = 0x8001
+
+	colorBtnFace   = 15
+	defaultGUIFont = 17
+	idcArrow       = 32512
+	idiApplication = 32512
+
+	mbOK              = 0x00000000
+	mbYesNo           = 0x00000004
+	mbIconInformation = 0x00000040
+	mbIconWarning     = 0x00000030
+	mbIconError       = 0x00000010
+	idYes             = 6
+
+	idInstall = 1001 + iota
+	idRescan
+	idConnect
+	idDisconnect
+	idReconnect
+	idStatus
+	idUninstall
+	idTerms
+	idPrivacy
+)
 
 //go:embed warp.ps1
 var warpScript []byte
 
-var (
-	shell32                = syscall.NewLazyDLL("shell32.dll")
-	kernel32               = syscall.NewLazyDLL("kernel32.dll")
-	procIsUserAnAdmin      = shell32.NewProc("IsUserAnAdmin")
-	procShellExecuteW      = shell32.NewProc("ShellExecuteW")
-	procSetConsoleCP       = kernel32.NewProc("SetConsoleCP")
-	procSetConsoleOutputCP = kernel32.NewProc("SetConsoleOutputCP")
-)
-
-var actions = map[string]string{
-	"install":    "Install",
-	"connect":    "Connect",
-	"disconnect": "Disconnect",
-	"reconnect":  "Reconnect",
-	"rescan":     "Rescan",
-	"status":     "Status",
-	"uninstall":  "Uninstall",
+type point struct {
+	x int32
+	y int32
 }
 
-func setUTF8Console() {
-	_, _, _ = procSetConsoleCP.Call(65001)
-	_, _, _ = procSetConsoleOutputCP.Call(65001)
+type message struct {
+	hwnd     uintptr
+	message  uint32
+	wParam   uintptr
+	lParam   uintptr
+	time     uint32
+	pt       point
+	lPrivate uint32
+}
+
+type rect struct {
+	left   int32
+	top    int32
+	right  int32
+	bottom int32
+}
+
+type wndClassEx struct {
+	cbSize     uint32
+	style      uint32
+	wndProc    uintptr
+	clsExtra   int32
+	wndExtra   int32
+	instance   uintptr
+	icon       uintptr
+	cursor     uintptr
+	background uintptr
+	menuName   *uint16
+	className  *uint16
+	iconSmall  uintptr
+}
+
+type taskResult struct {
+	action string
+	output string
+	err    error
+}
+
+type application struct {
+	window            uintptr
+	statusLabel       uintptr
+	logEdit           uintptr
+	sampleEdit        uintptr
+	countriesEdit     uintptr
+	nodesEdit         uintptr
+	excludedCountries uintptr
+	excludedNodes     uintptr
+	actionButtons     []uintptr
+	allControls       []uintptr
+	busy              bool
+	termsAccepted     bool
+	resultMu          sync.Mutex
+	result            taskResult
+}
+
+var (
+	user32   = syscall.NewLazyDLL("user32.dll")
+	kernel32 = syscall.NewLazyDLL("kernel32.dll")
+	gdi32    = syscall.NewLazyDLL("gdi32.dll")
+	shell32  = syscall.NewLazyDLL("shell32.dll")
+
+	procRegisterClassExW    = user32.NewProc("RegisterClassExW")
+	procCreateWindowExW     = user32.NewProc("CreateWindowExW")
+	procDefWindowProcW      = user32.NewProc("DefWindowProcW")
+	procDestroyWindow       = user32.NewProc("DestroyWindow")
+	procDispatchMessageW    = user32.NewProc("DispatchMessageW")
+	procEnableWindow        = user32.NewProc("EnableWindow")
+	procGetClientRect       = user32.NewProc("GetClientRect")
+	procGetMessageW         = user32.NewProc("GetMessageW")
+	procGetWindowTextLength = user32.NewProc("GetWindowTextLengthW")
+	procGetWindowTextW      = user32.NewProc("GetWindowTextW")
+	procLoadCursorW         = user32.NewProc("LoadCursorW")
+	procLoadIconW           = user32.NewProc("LoadIconW")
+	procMessageBoxW         = user32.NewProc("MessageBoxW")
+	procMoveWindow          = user32.NewProc("MoveWindow")
+	procPostMessageW        = user32.NewProc("PostMessageW")
+	procPostQuitMessage     = user32.NewProc("PostQuitMessage")
+	procSendMessageW        = user32.NewProc("SendMessageW")
+	procSetForegroundWindow = user32.NewProc("SetForegroundWindow")
+	procSetProcessDPIAware  = user32.NewProc("SetProcessDPIAware")
+	procSetWindowTextW      = user32.NewProc("SetWindowTextW")
+	procShowWindow          = user32.NewProc("ShowWindow")
+	procTranslateMessage    = user32.NewProc("TranslateMessage")
+	procUpdateWindow        = user32.NewProc("UpdateWindow")
+
+	procGetModuleHandleW   = kernel32.NewProc("GetModuleHandleW")
+	procSetConsoleCP       = kernel32.NewProc("SetConsoleCP")
+	procSetConsoleOutputCP = kernel32.NewProc("SetConsoleOutputCP")
+	procGetStockObject     = gdi32.NewProc("GetStockObject")
+	procIsUserAnAdmin      = shell32.NewProc("IsUserAnAdmin")
+	procShellExecuteW      = shell32.NewProc("ShellExecuteW")
+
+	app *application
+)
+
+var actionTitles = map[string]string{
+	"Install":    "установка",
+	"Rescan":     "поиск лучшего endpoint",
+	"Connect":    "подключение",
+	"Disconnect": "отключение",
+	"Reconnect":  "переподключение",
+	"Status":     "проверка состояния",
+	"Uninstall":  "удаление",
+}
+
+func actionTitle(action string) string {
+	if title, ok := actionTitles[action]; ok {
+		return title
+	}
+	return action
+}
+
+func utf16(value string) *uint16 {
+	pointer, _ := syscall.UTF16PtrFromString(value)
+	return pointer
+}
+
+func lowWord(value uintptr) uint16 {
+	return uint16(value & 0xffff)
+}
+
+func messageBox(owner uintptr, text, title string, flags uintptr) int {
+	result, _, _ := procMessageBoxW.Call(
+		owner,
+		uintptr(unsafe.Pointer(utf16(text))),
+		uintptr(unsafe.Pointer(utf16(title))),
+		flags,
+	)
+	return int(result)
 }
 
 func isAdministrator() bool {
@@ -49,215 +215,431 @@ func isAdministrator() bool {
 	return result != 0
 }
 
+func shellExecute(owner uintptr, verb, target, parameters string) error {
+	result, _, callErr := procShellExecuteW.Call(
+		owner,
+		uintptr(unsafe.Pointer(utf16(verb))),
+		uintptr(unsafe.Pointer(utf16(target))),
+		uintptr(unsafe.Pointer(utf16(parameters))),
+		0,
+		swShowNormal,
+	)
+	if result <= 32 {
+		return fmt.Errorf("ShellExecute завершился с кодом %d: %v", result, callErr)
+	}
+	return nil
+}
+
 func elevate() error {
 	executable, err := os.Executable()
 	if err != nil {
 		return err
 	}
-	verb, _ := syscall.UTF16PtrFromString("runas")
-	file, _ := syscall.UTF16PtrFromString(executable)
-	directory, _ := syscall.UTF16PtrFromString(filepath.Dir(executable))
 	quoted := make([]string, 0, len(os.Args)-1)
 	for _, argument := range os.Args[1:] {
 		quoted = append(quoted, syscall.EscapeArg(argument))
 	}
-	parameters, _ := syscall.UTF16PtrFromString(strings.Join(quoted, " "))
-	result, _, callErr := procShellExecuteW.Call(
+	return shellExecute(0, "runas", executable, strings.Join(quoted, " "))
+}
+
+func openURL(url string) {
+	if err := shellExecute(app.window, "open", url, ""); err != nil {
+		messageBox(app.window, err.Error(), "WARP", mbOK|mbIconError)
+	}
+}
+
+func setWindowText(handle uintptr, value string) {
+	procSetWindowTextW.Call(handle, uintptr(unsafe.Pointer(utf16(value))))
+}
+
+func windowText(handle uintptr) string {
+	length, _, _ := procGetWindowTextLength.Call(handle)
+	buffer := make([]uint16, int(length)+1)
+	procGetWindowTextW.Call(handle, uintptr(unsafe.Pointer(&buffer[0])), length+1)
+	return syscall.UTF16ToString(buffer)
+}
+
+func moveWindow(handle uintptr, x, y, width, height int32) {
+	if handle != 0 {
+		procMoveWindow.Call(handle, uintptr(x), uintptr(y), uintptr(width), uintptr(height), 1)
+	}
+}
+
+func createControl(class, text string, style uint32, id int) uintptr {
+	handle, _, _ := procCreateWindowExW.Call(
 		0,
-		uintptr(unsafe.Pointer(verb)),
-		uintptr(unsafe.Pointer(file)),
-		uintptr(unsafe.Pointer(parameters)),
-		uintptr(unsafe.Pointer(directory)),
-		1,
+		uintptr(unsafe.Pointer(utf16(class))),
+		uintptr(unsafe.Pointer(utf16(text))),
+		uintptr(style),
+		0, 0, 100, 30,
+		app.window,
+		uintptr(id),
+		0,
+		0,
 	)
-	if result <= 32 {
-		return fmt.Errorf("не удалось запросить права администратора (код %d): %v", result, callErr)
+	if handle == 0 {
+		return 0
 	}
-	return nil
+	font, _, _ := procGetStockObject.Call(defaultGUIFont)
+	procSendMessageW.Call(handle, wmSetFont, font, 1)
+	app.allControls = append(app.allControls, handle)
+	return handle
 }
 
-func canonicalAction(arguments []string) string {
-	if len(arguments) == 0 {
-		return "Install"
-	}
-	if action, ok := actions[strings.ToLower(arguments[0])]; ok {
-		return action
-	}
-	for index := 0; index+1 < len(arguments); index++ {
-		if strings.EqualFold(arguments[index], "-Action") || strings.EqualFold(arguments[index], "--action") {
-			if action, ok := actions[strings.ToLower(arguments[index+1])]; ok {
-				return action
-			}
-		}
-	}
-	return "Install"
+func createLabel(text string) uintptr {
+	return createControl("STATIC", text, wsChild|wsVisible, 0)
 }
 
-func normalizeArguments(arguments []string) ([]string, string, bool, error) {
-	if len(arguments) == 1 {
-		switch strings.ToLower(arguments[0]) {
-		case "--help", "-h", "/?":
-			return nil, "", false, errors.New("help")
-		case "--version", "-v":
-			return nil, "", false, errors.New("version")
-		}
-	}
-
-	action := canonicalAction(arguments)
-	normalized := make([]string, 0, len(arguments)+2)
-	if len(arguments) == 0 {
-		normalized = append(normalized, "-Action", action)
-	} else if canonical, ok := actions[strings.ToLower(arguments[0])]; ok {
-		normalized = append(normalized, "-Action", canonical)
-		arguments = arguments[1:]
-	}
-
-	accepted := false
-	for index := 0; index < len(arguments); index++ {
-		argument := arguments[index]
-		switch strings.ToLower(argument) {
-		case "--accept-cloudflare-terms":
-			normalized = append(normalized, "-AcceptCloudflareTerms")
-			accepted = true
-		case "--action":
-			normalized = append(normalized, "-Action")
-		case "--sample":
-			normalized = append(normalized, "-Sample")
-		case "--mtu":
-			normalized = append(normalized, "-Mtu")
-		case "--sni":
-			normalized = append(normalized, "-Sni")
-		case "--required-countries":
-			normalized = append(normalized, "-RequiredCountries")
-		case "--required-nodes":
-			normalized = append(normalized, "-RequiredNodes")
-		case "--excluded-countries":
-			normalized = append(normalized, "-ExcludedCountries")
-		case "--excluded-nodes":
-			normalized = append(normalized, "-ExcludedNodes")
-		case "--dns-servers":
-			normalized = append(normalized, "-DnsServers")
-		default:
-			normalized = append(normalized, argument)
-			if strings.EqualFold(argument, "-AcceptCloudflareTerms") {
-				accepted = true
-			}
-		}
-	}
-	return normalized, action, accepted, nil
+func createEdit(text string) uintptr {
+	return createControl("EDIT", text, wsChild|wsVisible|wsTabStop|wsBorder|esLeft, 0)
 }
 
-func acceptTerms() bool {
-	fmt.Println("Для регистрации WARP необходимо принять условия Cloudflare:")
-	fmt.Println("https://www.cloudflare.com/application/terms/")
-	fmt.Println("https://www.cloudflare.com/privacypolicy/")
-	fmt.Print("Продолжить регистрацию? [y/N]: ")
-	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
-	switch strings.ToLower(strings.TrimSpace(line)) {
-	case "y", "yes", "д", "да":
+func createButton(text string, id int, primary bool) uintptr {
+	style := uint32(wsChild | wsVisible | wsTabStop | bsPushButton)
+	if primary {
+		style = wsChild | wsVisible | wsTabStop | bsDefPushButton
+	}
+	button := createControl("BUTTON", text, style, id)
+	app.actionButtons = append(app.actionButtons, button)
+	return button
+}
+
+func layoutControls(width, height int32) {
+	if app == nil || len(app.allControls) < 22 {
+		return
+	}
+	margin := int32(18)
+	contentWidth := width - 2*margin
+	if contentWidth < 620 {
+		contentWidth = 620
+	}
+
+	moveWindow(app.allControls[0], margin, 15, contentWidth, 28)
+	moveWindow(app.statusLabel, margin, 47, contentWidth, 22)
+
+	buttonY := int32(78)
+	buttonWidth := int32(112)
+	gap := int32(8)
+	for index, button := range app.actionButtons[:7] {
+		x := margin + int32(index)*(buttonWidth+gap)
+		moveWindow(button, x, buttonY, buttonWidth, 32)
+	}
+
+	settingsY := int32(128)
+	labelWidth := int32(165)
+	fieldWidth := (contentWidth - 2*labelWidth - 30) / 2
+	if fieldWidth < 150 {
+		fieldWidth = 150
+	}
+	leftX := margin
+	leftField := leftX + labelWidth
+	rightX := margin + contentWidth/2 + 8
+	rightField := rightX + labelWidth
+
+	moveWindow(app.allControls[9], leftX, settingsY, labelWidth-8, 23)
+	moveWindow(app.sampleEdit, leftField, settingsY-3, 70, 27)
+	moveWindow(app.allControls[11], rightX, settingsY, labelWidth-8, 23)
+	moveWindow(app.countriesEdit, rightField, settingsY-3, fieldWidth, 27)
+
+	settingsY += 37
+	moveWindow(app.allControls[13], leftX, settingsY, labelWidth-8, 23)
+	moveWindow(app.nodesEdit, leftField, settingsY-3, fieldWidth, 27)
+	moveWindow(app.allControls[15], rightX, settingsY, labelWidth-8, 23)
+	moveWindow(app.excludedCountries, rightField, settingsY-3, fieldWidth, 27)
+
+	settingsY += 37
+	moveWindow(app.allControls[17], leftX, settingsY, labelWidth-8, 23)
+	moveWindow(app.excludedNodes, leftField, settingsY-3, fieldWidth, 27)
+	moveWindow(app.allControls[19], rightX, settingsY-3, 145, 27)
+	moveWindow(app.allControls[20], rightX+153, settingsY-3, 175, 27)
+
+	logY := settingsY + 43
+	moveWindow(app.allControls[21], margin, logY, contentWidth, 23)
+	logY += 25
+	logHeight := height - logY - margin
+	if logHeight < 150 {
+		logHeight = 150
+	}
+	moveWindow(app.logEdit, margin, logY, contentWidth, logHeight)
+}
+
+func boolToUintptr(value bool) uintptr {
+	if value {
+		return 1
+	}
+	return 0
+}
+
+func setBusy(busy bool, status string) {
+	app.busy = busy
+	for _, button := range app.actionButtons {
+		procEnableWindow.Call(button, boolToUintptr(!busy))
+	}
+	setWindowText(app.statusLabel, status)
+}
+
+func confirmTerms() bool {
+	if app.termsAccepted {
 		return true
-	default:
+	}
+	text := "Для регистрации WARP необходимо принять условия Cloudflare.\r\n\r\n" +
+		"Условия: https://www.cloudflare.com/application/terms/\r\n" +
+		"Конфиденциальность: https://www.cloudflare.com/privacypolicy/\r\n\r\n" +
+		"Вы прочитали документы и согласны продолжить?"
+	if messageBox(app.window, text, "Регистрация Cloudflare WARP", mbYesNo|mbIconInformation) != idYes {
 		return false
 	}
+	app.termsAccepted = true
+	return true
 }
 
-func printUsage() {
-	fmt.Printf(`WARP Windows client v%s
-
-Использование:
-  warp-windows.exe
-  warp-windows.exe Status
-  warp-windows.exe Connect|Disconnect|Reconnect
-  warp-windows.exe Rescan --sample 8
-  warp-windows.exe Uninstall
-
-Для автоматической установки без вопроса:
-  warp-windows.exe Install --accept-cloudflare-terms
-`, version)
+func scanArguments(action string) ([]string, error) {
+	sampleText := strings.TrimSpace(windowText(app.sampleEdit))
+	sample, err := strconv.Atoi(sampleText)
+	if err != nil || sample < 1 || sample > 16 {
+		return nil, errors.New("число кандидатов должно быть от 1 до 16")
+	}
+	arguments := []string{"-Action", action, "-AcceptCloudflareTerms", "-Sample", strconv.Itoa(sample)}
+	optional := []struct {
+		name   string
+		handle uintptr
+	}{
+		{"-RequiredCountries", app.countriesEdit},
+		{"-RequiredNodes", app.nodesEdit},
+		{"-ExcludedCountries", app.excludedCountries},
+		{"-ExcludedNodes", app.excludedNodes},
+	}
+	for _, option := range optional {
+		value := strings.TrimSpace(windowText(option.handle))
+		if value != "" {
+			arguments = append(arguments, option.name, value)
+		}
+	}
+	return arguments, nil
 }
 
-func waitForEnter() {
-	fmt.Print("Нажмите Enter для выхода...")
-	_, _ = bufio.NewReader(os.Stdin).ReadString('\n')
+func startAction(action string) {
+	if app.busy {
+		return
+	}
+	if (action == "Install" || action == "Rescan") && !confirmTerms() {
+		return
+	}
+	if action == "Uninstall" && messageBox(app.window, "Удалить службу WARP, профиль и локальные ключи?", "Удаление WARP", mbYesNo|mbIconWarning) != idYes {
+		return
+	}
+
+	arguments := []string{"-Action", action}
+	var err error
+	if action == "Install" || action == "Rescan" {
+		arguments, err = scanArguments(action)
+		if err != nil {
+			messageBox(app.window, err.Error(), "Некорректные параметры", mbOK|mbIconWarning)
+			return
+		}
+	}
+	setWindowText(app.logEdit, "")
+	setBusy(true, "Выполняется: "+actionTitle(action)+"…")
+	go func() {
+		output, runErr := runPowerShell(arguments)
+		app.resultMu.Lock()
+		app.result = taskResult{action: action, output: output, err: runErr}
+		app.resultMu.Unlock()
+		procPostMessageW.Call(app.window, wmAppTaskDone, 0, 0)
+	}()
 }
 
-func runPowerShell(arguments []string) error {
+func completeAction() {
+	app.resultMu.Lock()
+	result := app.result
+	app.result = taskResult{}
+	app.resultMu.Unlock()
+	output := strings.TrimSpace(result.output)
+	if output == "" {
+		output = "Команда не вернула текстовый результат."
+	}
+	setWindowText(app.logEdit, output)
+	if result.err != nil {
+		setBusy(false, "Ошибка: "+actionTitle(result.action))
+		messageBox(app.window, "Операция завершилась ошибкой. Подробности находятся в журнале.", "WARP", mbOK|mbIconError)
+		return
+	}
+	setBusy(false, "Готово: "+actionTitle(result.action))
+}
+
+func runPowerShell(arguments []string) (string, error) {
 	temporaryDirectory, err := os.MkdirTemp("", "warp-windows-")
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer os.RemoveAll(temporaryDirectory)
 	scriptPath := filepath.Join(temporaryDirectory, "warp.ps1")
 	if err := os.WriteFile(scriptPath, warpScript, 0600); err != nil {
-		return err
+		return "", err
 	}
 	systemRoot := os.Getenv("SystemRoot")
 	if systemRoot == "" {
 		systemRoot = `C:\Windows`
 	}
 	powerShell := filepath.Join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
-	commandArguments := []string{
-		"-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", scriptPath,
-	}
+	commandArguments := []string{"-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", scriptPath}
 	commandArguments = append(commandArguments, arguments...)
 	command := exec.Command(powerShell, commandArguments...)
-	command.Stdin = os.Stdin
-	command.Stdout = os.Stdout
-	command.Stderr = os.Stderr
-	return command.Run()
+	var output bytes.Buffer
+	command.Stdout = &output
+	command.Stderr = &output
+	err = command.Run()
+	if err != nil {
+		output.WriteString("\r\n\r\nОшибка запуска: ")
+		output.WriteString(err.Error())
+	}
+	return output.String(), err
+}
+
+func windowProcedure(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
+	switch msg {
+	case wmCreate:
+		return 0
+	case wmSize:
+		if app != nil {
+			layoutControls(int32(lowWord(lParam)), int32(uint16((lParam>>16)&0xffff)))
+		}
+		return 0
+	case wmCommand:
+		switch int(lowWord(wParam)) {
+		case idInstall:
+			startAction("Install")
+		case idRescan:
+			startAction("Rescan")
+		case idConnect:
+			startAction("Connect")
+		case idDisconnect:
+			startAction("Disconnect")
+		case idReconnect:
+			startAction("Reconnect")
+		case idStatus:
+			startAction("Status")
+		case idUninstall:
+			startAction("Uninstall")
+		case idTerms:
+			openURL("https://www.cloudflare.com/application/terms/")
+		case idPrivacy:
+			openURL("https://www.cloudflare.com/privacypolicy/")
+		}
+		return 0
+	case wmAppTaskDone:
+		completeAction()
+		return 0
+	case wmClose:
+		if app != nil && app.busy {
+			messageBox(hwnd, "Дождитесь завершения текущей операции.", "WARP", mbOK|mbIconInformation)
+			return 0
+		}
+		procDestroyWindow.Call(hwnd)
+		return 0
+	case wmDestroy:
+		procPostQuitMessage.Call(0)
+		return 0
+	}
+	result, _, _ := procDefWindowProcW.Call(hwnd, uintptr(msg), wParam, lParam)
+	return result
+}
+
+func createApplicationWindow() error {
+	instance, _, _ := procGetModuleHandleW.Call(0)
+	className := utf16("CFWarpWindowsClient")
+	cursor, _, _ := procLoadCursorW.Call(0, idcArrow)
+	icon, _, _ := procLoadIconW.Call(0, idiApplication)
+	class := wndClassEx{
+		cbSize:     uint32(unsafe.Sizeof(wndClassEx{})),
+		wndProc:    syscall.NewCallback(windowProcedure),
+		instance:   instance,
+		icon:       icon,
+		cursor:     cursor,
+		background: colorBtnFace + 1,
+		className:  className,
+		iconSmall:  icon,
+	}
+	if registered, _, callErr := procRegisterClassExW.Call(uintptr(unsafe.Pointer(&class))); registered == 0 {
+		return fmt.Errorf("не удалось зарегистрировать окно: %v", callErr)
+	}
+
+	window, _, callErr := procCreateWindowExW.Call(
+		0,
+		uintptr(unsafe.Pointer(className)),
+		uintptr(unsafe.Pointer(utf16("WARP for Windows "+version))),
+		wsOverlappedWindow|wsClipChildren,
+		100, 80, 900, 650,
+		0, 0, instance, 0,
+	)
+	if window == 0 {
+		return fmt.Errorf("не удалось создать окно: %v", callErr)
+	}
+	app = &application{window: window}
+
+	createLabel("Cloudflare WARP — full-tunnel через AmneziaWG")
+	app.statusLabel = createLabel("Состояние ещё не проверено")
+	createButton("Установить", idInstall, true)
+	createButton("Лучший endpoint", idRescan, false)
+	createButton("Подключить", idConnect, false)
+	createButton("Отключить", idDisconnect, false)
+	createButton("Переподключить", idReconnect, false)
+	createButton("Состояние", idStatus, false)
+	createButton("Удалить", idUninstall, false)
+	createLabel("Кандидатов (1–16):")
+	app.sampleEdit = createEdit("3")
+	createLabel("Требуемые страны:")
+	app.countriesEdit = createEdit("")
+	createLabel("Требуемые узлы:")
+	app.nodesEdit = createEdit("")
+	createLabel("Исключить страны:")
+	app.excludedCountries = createEdit("RU")
+	createLabel("Исключить узлы:")
+	app.excludedNodes = createEdit("DME")
+	createControl("BUTTON", "Условия Cloudflare", wsChild|wsVisible|wsTabStop|bsPushButton, idTerms)
+	createControl("BUTTON", "Конфиденциальность", wsChild|wsVisible|wsTabStop|bsPushButton, idPrivacy)
+	createLabel("Журнал:")
+	app.logEdit = createControl("EDIT", "", wsChild|wsVisible|wsBorder|wsVScroll|esLeft|esMultiline|esAutoVScroll|esReadOnly, 0)
+
+	var client rect
+	procGetClientRect.Call(window, uintptr(unsafe.Pointer(&client)))
+	layoutControls(client.right-client.left, client.bottom-client.top)
+	procShowWindow.Call(window, swShow)
+	procUpdateWindow.Call(window)
+	procSetForegroundWindow.Call(window)
+	return nil
+}
+
+func messageLoop() int {
+	var msg message
+	for {
+		result, _, _ := procGetMessageW.Call(uintptr(unsafe.Pointer(&msg)), 0, 0, 0)
+		if int32(result) == -1 {
+			return 1
+		}
+		if result == 0 {
+			return int(msg.wParam)
+		}
+		procTranslateMessage.Call(uintptr(unsafe.Pointer(&msg)))
+		procDispatchMessageW.Call(uintptr(unsafe.Pointer(&msg)))
+	}
 }
 
 func main() {
-	setUTF8Console()
-	originalArguments := append([]string(nil), os.Args[1:]...)
-	arguments, action, accepted, err := normalizeArguments(originalArguments)
-	if err != nil {
-		switch err.Error() {
-		case "help":
-			printUsage()
-			return
-		case "version":
-			fmt.Println(version)
-			return
-		default:
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(2)
-		}
-	}
-
-	if !strings.EqualFold(action, "Status") && !isAdministrator() {
+	runtime.LockOSThread()
+	procSetConsoleCP.Call(65001)
+	procSetConsoleOutputCP.Call(65001)
+	procSetProcessDPIAware.Call()
+	if !isAdministrator() {
 		if err := elevate(); err != nil {
-			fmt.Fprintln(os.Stderr, "Ошибка:", err)
-			os.Exit(1)
+			messageBox(0, "Не удалось запросить права администратора:\r\n"+err.Error(), "WARP", mbOK|mbIconError)
 		}
 		return
 	}
-
-	interactive := len(originalArguments) == 0
-	if (action == "Install" || action == "Rescan") && !accepted {
-		if !acceptTerms() {
-			fmt.Println("Регистрация отменена.")
-			if interactive {
-				waitForEnter()
-			}
-			return
-		}
-		arguments = append(arguments, "-AcceptCloudflareTerms")
+	if err := createApplicationWindow(); err != nil {
+		messageBox(0, err.Error(), "WARP", mbOK|mbIconError)
+		return
 	}
-
-	if err := runPowerShell(arguments); err != nil {
-		var exitError *exec.ExitError
-		if errors.As(err, &exitError) {
-			fmt.Fprintf(os.Stderr, "WARP завершился с кодом %d.\n", exitError.ExitCode())
-		} else {
-			fmt.Fprintln(os.Stderr, "Не удалось запустить WARP:", err)
-		}
-		if interactive {
-			waitForEnter()
-		}
-		os.Exit(1)
-	}
-	if interactive {
-		waitForEnter()
-	}
+	startAction("Status")
+	os.Exit(messageLoop())
 }

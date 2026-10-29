@@ -151,10 +151,11 @@ full-tunnel-службу через официальный AmneziaWG for Windows
 Для обычной Windows x64 скачайте `warp-windows.exe` из
 [последнего релиза](https://github.com/BAzeRlok/CFWARP-OPENWRT/releases/latest)
 и запустите двойным щелчком. EXE сам запросит права администратора и согласие с
-условиями Cloudflare. Для Windows on ARM используется
+условиями Cloudflare, после чего откроет графическое окно управления. Для
+Windows on ARM используется
 `warp-windows-arm64.exe`.
 
-Подробности и команды управления: [windows/README.md](windows/README.md).
+Подробности интерфейса: [windows/README.md](windows/README.md).
 
 ## Удаление
 

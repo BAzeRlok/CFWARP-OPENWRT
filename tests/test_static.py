@@ -341,14 +341,14 @@ PersistentKeepalive = 25
     def test_installer_selects_supported_arm64_packages(self):
         installer = (ROOT / "install.sh").read_text(encoding="utf-8")
         self.assertIn("aarch64|aarch64_cortex-a53)", installer)
-        self.assertIn('LUCI_PACKAGE="luci-app-warp-4.1.1-r1.apk"', installer)
+        self.assertIn('LUCI_PACKAGE="luci-app-warp-4.2.0-r1.apk"', installer)
         self.assertIn('AWG_PACKAGE="warp-awg-3.1.20260828-r3-$ARCH.apk"', installer)
         self.assertNotIn('SCOUT_PACKAGE=', installer)
         self.assertIn("apk del warp-warpscout", installer)
         self.assertIn('result=$(/usr/libexec/warp-manager enable)', installer)
         self.assertIn("DISTRIB_ARCH", installer)
         self.assertIn("OPENWRT_ARCH", installer)
-        self.assertIn('RELEASE_TAG="v4.1.1"', installer)
+        self.assertIn('RELEASE_TAG="v4.2.0"', installer)
         self.assertIn('uci set warp.main.sni="$MASKING_SNI"', installer)
 
     def test_latency_watchdog_defaults_and_windows_full_tunnel(self):
@@ -372,9 +372,15 @@ PersistentKeepalive = 25
         self.assertNotIn("__HELPER_", windows)
         self.assertIn("//go:embed warp.ps1", launcher)
         self.assertIn('NewProc("ShellExecuteW")', launcher)
+        self.assertIn('NewProc("CreateWindowExW")', launcher)
+        self.assertIn('createButton("Лучший endpoint"', launcher)
+        self.assertIn('createButton("Подключить"', launcher)
+        self.assertIn('createButton("Отключить"', launcher)
+        self.assertIn("[Console]::OutputEncoding", windows)
         build_script = (ROOT / "tools/build-windows-client.sh").read_text(encoding="utf-8")
         self.assertIn("GOOS=windows GOARCH=amd64", build_script)
         self.assertIn("GOOS=windows GOARCH=arm64", build_script)
+        self.assertIn("-H=windowsgui", build_script)
         checksums = dict(
             reversed(line.split())
             for line in (ROOT / "release/SHA256SUMS").read_text(encoding="utf-8").splitlines()
