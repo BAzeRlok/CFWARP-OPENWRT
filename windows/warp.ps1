@@ -323,7 +323,7 @@ function New-WarpConfiguration {
     @(
         'scan', '--plain', '--account', $AccountPath, '--proto', 'awg',
         '--gen-i1', 'quic', '--i1-sni', $Sni,
-        '--sample', [string]$Sample, '--tunnel-jobs', '2',
+        '--sample', [string]$Sample, '--tunnel-jobs', '1', '--timeout', '4', '--auto-mask',
         '--tun-ping-count', '10', '--ping-target', '8.8.8.8',
         '--no-report', '--conf', $CandidatePath, '--mtu', [string]$Mtu
     ) | ForEach-Object { $arguments.Add($_) }
@@ -345,6 +345,39 @@ function New-WarpConfiguration {
     $config = Set-ConfigurationDNS $config $DnsServers
     [IO.File]::WriteAllText($CandidatePath, $config, [Text.UTF8Encoding]::new($false))
     Protect-StateFile $CandidatePath
+}
+
+function Update-WarpTunnel {
+    $service = Get-TunnelService
+    $wasRunning = $false
+    if ($null -ne $service) {
+        try { $wasRunning = $service.Status -eq [ServiceProcess.ServiceControllerStatus]::Running }
+        finally { $service.Dispose() }
+    }
+    try {
+        # Probing through our own full tunnel can create a nested UDP path.
+        # Stop only WARP; leave unrelated VPN services and their routes alone.
+        if ($wasRunning) {
+            Stop-ExternalDNS
+            Stop-Service -Name $ServiceName
+            (Get-Service -Name $ServiceName).WaitForStatus([ServiceProcess.ServiceControllerStatus]::Stopped, [TimeSpan]::FromSeconds(30))
+        }
+        Ensure-Account
+        New-WarpConfiguration
+        Install-TunnelConfiguration
+    }
+    catch {
+        $originalError = $_
+        if ($wasRunning) {
+            try {
+                Start-Service -Name $ServiceName
+                (Get-Service -Name $ServiceName).WaitForStatus([ServiceProcess.ServiceControllerStatus]::Running, [TimeSpan]::FromSeconds(30))
+                Start-ExternalDNS
+            }
+            catch { throw "$originalError`nОшибка восстановления прежнего WARP: $_" }
+        }
+        throw $originalError
+    }
 }
 
 function Remove-TunnelService {
@@ -620,18 +653,14 @@ switch ($Action) {
         Protect-StateDirectory
         Install-AmneziaWG $architecture $hashes
         Install-Helper
-        Ensure-Account
-        New-WarpConfiguration
-        Install-TunnelConfiguration
+        Update-WarpTunnel
         Write-Host 'WARP подключён. IPv4, IPv6 и DNS по умолчанию направлены через туннель.'
     }
     'Rescan' {
         Protect-StateDirectory
         Install-AmneziaWG $architecture $hashes
         Install-Helper
-        Ensure-Account
-        New-WarpConfiguration
-        Install-TunnelConfiguration
+        Update-WarpTunnel
         Write-Host 'Выбран лучший из проверенных endpoint, WARP переподключён.'
     }
     'Connect' {

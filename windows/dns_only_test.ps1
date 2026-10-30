@@ -64,6 +64,7 @@ try {
         [IO.File]::WriteAllText($CandidatePath, "[Interface]`nAddress = 172.16.0.2/32`n[Peer]`nAllowedIPs = 0.0.0.0/0, ::/0`n")
     }
     New-WarpConfiguration
+    Assert ('--auto-mask' -in $script:helperArguments -and '--timeout' -in $script:helperArguments) 'Windows adaptive data-plane checks not enabled'
     Assert ('--exclude-country' -notin $script:helperArguments -and '--exclude-node' -notin $script:helperArguments) 'Empty filters restored exclusion defaults'
     $ExcludedCountries = 'RU'; $ExcludedNodes = 'DME'
     New-WarpConfiguration

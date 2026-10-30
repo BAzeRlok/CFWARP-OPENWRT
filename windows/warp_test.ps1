@@ -139,6 +139,27 @@ try {
     $rejected = $false
     try { Install-Helper } catch { $rejected = $true }
     Assert $rejected 'Missing bundled helper checksum must be rejected'
-    'PowerShell DNS, installation rollback and embedded helper tests OK'
+    # Rescanning through our own active full tunnel must be avoided. Restore
+    # the prior tunnel/DNS when account setup or endpoint scanning fails.
+    function Ensure-Account {
+        Assert (-not $script:serviceStates.ContainsKey('Tunnel') -or $script:serviceStates['Tunnel'] -eq [ServiceProcess.ServiceControllerStatus]::Stopped) 'Registration nested inside the old WARP tunnel'
+    }
+    function New-WarpConfiguration { throw 'Simulated endpoint scan failure' }
+    function Start-ExternalDNS { $script:serviceStates['DNS'] = [ServiceProcess.ServiceControllerStatus]::Running }
+    foreach ($running in @($false, $true)) {
+        $script:serviceStates = @{ Tunnel = [ServiceProcess.ServiceControllerStatus]::Stopped; DNS = [ServiceProcess.ServiceControllerStatus]::Stopped }
+        if ($running) { $script:serviceStates['Tunnel'] = [ServiceProcess.ServiceControllerStatus]::Running; $script:serviceStates['DNS'] = [ServiceProcess.ServiceControllerStatus]::Running }
+        $script:failStartCount = 0
+        $rejected = $false
+        try { Update-WarpTunnel } catch { $rejected = $_.ToString() -match 'Simulated endpoint scan failure' }
+        Assert $rejected 'Endpoint search failure not reported'
+        Assert (($script:serviceStates['Tunnel'] -eq [ServiceProcess.ServiceControllerStatus]::Running) -eq $running) 'Failed search changed previous tunnel state'
+        Assert (($script:serviceStates['DNS'] -eq [ServiceProcess.ServiceControllerStatus]::Running) -eq $running) 'Failed search changed previous DNS state'
+    }
+    function New-WarpConfiguration {}
+    function Install-TunnelConfiguration { $script:serviceStates['Tunnel'] = [ServiceProcess.ServiceControllerStatus]::Running }
+    Update-WarpTunnel
+    Assert ($script:serviceStates['Tunnel'] -eq [ServiceProcess.ServiceControllerStatus]::Running) 'Successful rescan did not replace the tunnel'
+    'PowerShell DNS, scan rollback, installation rollback and embedded helper tests OK'
 }
 finally { Remove-Item -LiteralPath $StateDirectory -Recurse -Force }

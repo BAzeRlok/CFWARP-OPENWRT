@@ -1,0 +1,99 @@
+--- a/main.go
++++ b/main.go
+@@ -91,7 +91,7 @@
+ 	return nil
+ }
+ 
+-func runScanCmd(ctx context.Context, opts options) error {
++func runWindowsScanAttempt(ctx context.Context, opts options) error {
+ 	if err := loadScanAccount(opts.accountPath); err != nil {
+ 		return err
+ 	}
+@@ -105,9 +105,12 @@
+ 	ph, err := runScanUI(ctx, cancel, opts, run, ips, time.Duration(opts.timeoutSec)*time.Second, "", "")
+ 	if err != nil {
+ 		// runScan already reported the failure through the emit seam.
+-		os.Exit(1)
+-	}
+-
++		return err
++	}
++
++	if len(workingSorted(ph.results)) == 0 {
++		return errNoVerifiedEndpoint
++	}
+ 	if filtered(opts) {
+ 		ph = applyFilters(ph, opts)
+ 		pools = poolsWithHits(ph)
+@@ -309,7 +312,7 @@
+ 			if pings > 0 {
+ 				r.tunPing, r.loss, r.measured, r.durable = rtt, loss, true, !torn
+ 			}
+-			if hrtt, pok := pingHost(ip, timeout); pok {
++			if hrtt, pok := windowsEndpointPing(ip, timeout, pings); pok {
+ 				r.epPing = hrtt
+ 			}
+ 			found := foundMsg{endpoint: endpoint, epPing: r.epPing, tunPing: r.tunPing, loss: r.loss, measured: r.measured, torn: !r.durable}
+--- a/tunnel.go
++++ b/tunnel.go
+@@ -157,30 +157,7 @@
+ }
+ 
+ func probeEndpoint(ctx context.Context, t tunnel, endpoint string, timeout time.Duration, pings int, wantMeta bool) (tr metaResult, rtt time.Duration, loss float32, torn, ok bool) {
+-	if !t.handshake(ctx, endpoint, timeout) {
+-		return metaResult{}, 0, 0, false, false
+-	}
+-	st := t.stack()
+-
+-	// find-junk only asks whether the peer comes up, and the durability ping
+-	// already proves the tunnel passes data - the meta fetch adds nothing.
+-	if !wantMeta {
+-		if pings <= 0 {
+-			return metaResult{}, 0, 0, false, true
+-		}
+-		rtt, loss, torn = st.durability(pings, timeout)
+-		return metaResult{}, rtt, loss, torn, true
+-	}
+-
+-	body, ok := st.fetch(ctx, timeout)
+-	if !ok {
+-		return metaResult{}, 0, 0, false, false
+-	}
+-	if pings <= 0 {
+-		return parseMeta(body), 0, 0, false, true
+-	}
+-	rtt, loss, torn = st.durability(pings, timeout)
+-	return parseMeta(body), rtt, loss, torn, true
++	return probeWindowsEndpoint(ctx, t, endpoint, timeout, pings, wantMeta)
+ }
+ 
+ // A real DPI teardown stays dead across both bursts; transient loss does not,
+--- a/mini_flags.go
++++ b/mini_flags.go
+@@ -43,6 +43,7 @@
+ 	tunPingCheck   bool
+ 	wantMeta       bool
+ 	plain          bool
++	autoMask       bool
+ }
+ 
+ type flagSpec struct{ short, long, meta, help string }
+@@ -99,6 +100,7 @@
+ 	fs.IntVar(&o.mtu, "mtu", 0, "")
+ 	fs.BoolVar(&o.noDNS, "no-dns", false, "")
+ 	fs.BoolVar(&o.plain, "plain", false, "")
++	fs.BoolVar(&o.autoMask, "auto-mask", false, "try another masking profile if no data path works")
+ 	addAWGFlags(fs, o)
+ 	o.wantMeta = true
+ }
+--- a/mini_report.go
++++ b/mini_report.go
+@@ -107,7 +107,7 @@
+ 	set := upperSet(values)
+ 	return filterResults(ph, func(result endpointResult) bool {
+ 		if result.exit.coloISO == "" {
+-			return !want
++			return false // Unknown node countries must not bypass explicit restrictions.
+ 		}
+ 		_, exists := set[strings.ToUpper(result.exit.coloISO)]
+ 		return exists == want

@@ -5,7 +5,9 @@ set -eu
 root_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 output_dir="$root_dir/dist"
 asset_dir="$root_dir/windows/assets"
-helper_version=$(sed -n 's/^PKG_VERSION:=//p' "$root_dir/warp-warpscout/Makefile")-r$(sed -n 's/^PKG_RELEASE:=//p' "$root_dir/warp-warpscout/Makefile")
+helper_revision=$(cat "$root_dir/windows/helper-revision")
+case "$helper_revision" in ''|*[!0-9]*) printf 'Invalid Windows helper revision\n' >&2; exit 1 ;; esac
+helper_version=$(sed -n 's/^PKG_VERSION:=//p' "$root_dir/warp-warpscout/Makefile")-r$helper_revision
 
 mkdir -p "$output_dir" "$asset_dir"
 

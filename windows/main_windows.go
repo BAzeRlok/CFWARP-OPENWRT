@@ -22,7 +22,7 @@ import (
 )
 
 const (
-	version = "4.2.0-r5"
+	version = "4.2.0-r6"
 
 	wsOverlappedWindow = 0x00CF0000
 	wsChild            = 0x40000000
@@ -635,6 +635,9 @@ func runPowerShell(arguments []string) (string, error) {
 	command.Stderr = &output
 	err = command.Run()
 	if err != nil {
+		if strings.Contains(output.String(), "no working endpoints found") {
+			output.WriteString("\r\nРегистрация выполнена, но не найден туннель с подтверждённой передачей HTTPS. Причины отказов указаны в строках handshake, https и Probe results выше. Аккаунт сохранён для повторной попытки.\r\n")
+		}
 		if strings.Contains(output.String(), "every endpoint was excluded") {
 			output.WriteString("\r\nРегистрация успешна. Все найденные узлы исключены заданными фильтрами. Очистите поля «Исключить страны» и «Исключить узлы» либо измените требования и повторите поиск. Иностранный выход без доступной иностранной точки не гарантируется.\r\n")
 		}
