@@ -17,11 +17,12 @@ import (
 	"syscall"
 	"unsafe"
 
+	win "golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
 )
 
 const (
-	version = "4.2.0-r4"
+	version = "4.2.0-r5"
 
 	wsOverlappedWindow = 0x00CF0000
 	wsChild            = 0x40000000
@@ -81,10 +82,14 @@ const (
 	idDNSEnabled
 	idDNSType
 	idApplyDNS
+	idDNSOnly
 )
 
 //go:embed warp.ps1
 var warpScript []byte
+
+//go:embed dns_only.ps1
+var dnsOnlyScript []byte
 
 type point struct {
 	x int32
@@ -144,6 +149,7 @@ type application struct {
 	dnsAddressLabel   uintptr
 	dnsAddress        uintptr
 	dnsApplyButton    uintptr
+	dnsOnlyButton     uintptr
 	dnsLoadError      error
 	actionButtons     []uintptr
 	allControls       []uintptr
@@ -194,14 +200,16 @@ var (
 )
 
 var actionTitles = map[string]string{
-	"Install":    "установка",
-	"Rescan":     "поиск лучшего endpoint",
-	"Connect":    "подключение",
-	"Disconnect": "отключение",
-	"Reconnect":  "переподключение",
-	"Status":     "проверка состояния",
-	"Uninstall":  "удаление",
-	"ApplyDNS":   "применение DNS",
+	"Install":     "установка",
+	"Rescan":      "поиск лучшего endpoint",
+	"Connect":     "подключение",
+	"Disconnect":  "отключение",
+	"Reconnect":   "переподключение",
+	"Status":      "проверка состояния",
+	"Uninstall":   "удаление",
+	"ApplyDNS":    "применение DNS",
+	"DNSOnly":     "только DNS",
+	"StopDNSOnly": "отключение DNS",
 }
 
 func actionTitle(action string) string {
@@ -377,6 +385,7 @@ func layoutControls(width, height int32) {
 	moveWindow(app.dnsEnabled, leftX, settingsY-3, labelWidth, 27)
 	moveWindow(app.dnsTypeLabel, leftField, settingsY, 42, 23)
 	moveWindow(app.dnsType, leftField+45, settingsY-3, 100, 140)
+	moveWindow(app.dnsOnlyButton, rightX, settingsY-3, labelWidth-8, 27)
 	moveWindow(app.dnsApplyButton, rightField, settingsY-3, fieldWidth, 27)
 	settingsY += 37
 	moveWindow(app.dnsAddressLabel, leftX, settingsY, labelWidth-8, 23)
@@ -438,6 +447,11 @@ func setDNSControls(config dnsConfig) {
 	}
 	procSendMessageW.Call(app.dnsType, cbSetCurSel, selection, 0)
 	setWindowText(app.dnsAddress, config.Address)
+	title := "Только DNS"
+	if dnsOnlyActive() {
+		title = "Выключить DNS"
+	}
+	setWindowText(app.dnsOnlyButton, title)
 	updateDNSControls()
 }
 
@@ -515,7 +529,10 @@ func startAction(action string) {
 		}
 	}
 	dns := dnsControlsConfig()
-	if action == "Install" || action == "Rescan" || action == "ApplyDNS" {
+	if action == "DNSOnly" {
+		dns.Enabled = true
+	}
+	if action == "Install" || action == "Rescan" || action == "ApplyDNS" || action == "DNSOnly" {
 		if err := validateDNSConfig(dns); err != nil {
 			messageBox(app.window, err.Error(), "Некорректные настройки DNS", mbOK|mbIconWarning)
 			return
@@ -548,6 +565,11 @@ func completeAction() {
 		output = "Команда не вернула текстовый результат."
 	}
 	setWindowText(app.logEdit, output)
+	config, loadErr := loadDNSConfig()
+	app.dnsLoadError = loadErr
+	if loadErr == nil {
+		setDNSControls(config)
+	}
 	if result.err != nil {
 		setBusy(false, "Ошибка: "+actionTitle(result.action))
 		messageBox(app.window, "Операция завершилась ошибкой. Подробности находятся в журнале.", "WARP", mbOK|mbIconError)
@@ -561,15 +583,11 @@ func completeAction() {
 		}
 		procDestroyWindow.Call(app.window)
 		return
-	} else if result.action == "ApplyDNS" || result.action == "Install" || result.action == "Rescan" {
-		config, err := loadDNSConfig()
-		app.dnsLoadError = err
-		if err != nil {
-			setWindowText(app.logEdit, output+"\r\n\r\nОшибка чтения настроек DNS: "+err.Error())
-			setBusy(false, "Ошибка чтения настроек DNS")
-			return
-		}
-		setDNSControls(config)
+	}
+	if loadErr != nil {
+		setWindowText(app.logEdit, output+"\r\n\r\nОшибка чтения настроек DNS: "+loadErr.Error())
+		setBusy(false, "Ошибка чтения настроек DNS")
+		return
 	}
 	setBusy(false, "Готово: "+actionTitle(result.action))
 }
@@ -600,6 +618,9 @@ func runPowerShell(arguments []string) (string, error) {
 	if err := os.WriteFile(scriptPath, script, 0600); err != nil {
 		return "", err
 	}
+	if err := os.WriteFile(filepath.Join(temporaryDirectory, "dns_only.ps1"), append([]byte{0xef, 0xbb, 0xbf}, dnsOnlyScript...), 0600); err != nil {
+		return "", err
+	}
 	systemRoot := os.Getenv("SystemRoot")
 	if systemRoot == "" {
 		systemRoot = `C:\Windows`
@@ -614,6 +635,9 @@ func runPowerShell(arguments []string) (string, error) {
 	command.Stderr = &output
 	err = command.Run()
 	if err != nil {
+		if strings.Contains(output.String(), "every endpoint was excluded") {
+			output.WriteString("\r\nРегистрация успешна. Все найденные узлы исключены заданными фильтрами. Очистите поля «Исключить страны» и «Исключить узлы» либо измените требования и повторите поиск. Иностранный выход без доступной иностранной точки не гарантируется.\r\n")
+		}
 		output.WriteString("\r\n\r\nОшибка запуска: ")
 		output.WriteString(err.Error())
 	}
@@ -649,6 +673,12 @@ func windowProcedure(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 			updateDNSControls()
 		case idApplyDNS:
 			startAction("ApplyDNS")
+		case idDNSOnly:
+			if dnsOnlyActive() {
+				startAction("StopDNSOnly")
+			} else {
+				startAction("DNSOnly")
+			}
 		case idTerms:
 			openURL("https://www.cloudflare.com/application/terms/")
 		case idPrivacy:
@@ -721,9 +751,9 @@ func createApplicationWindow() error {
 	createLabel("Требуемые узлы:")
 	app.nodesEdit = createEdit("")
 	createLabel("Исключить страны:")
-	app.excludedCountries = createEdit("RU")
+	app.excludedCountries = createEdit("")
 	createLabel("Исключить узлы:")
-	app.excludedNodes = createEdit("DME")
+	app.excludedNodes = createEdit("")
 	createControl("BUTTON", "Условия Cloudflare", wsChild|wsVisible|wsTabStop|bsPushButton, idTerms)
 	createControl("BUTTON", "Конфиденциальность", wsChild|wsVisible|wsTabStop|bsPushButton, idPrivacy)
 	createLabel("Журнал:")
@@ -737,6 +767,7 @@ func createApplicationWindow() error {
 	app.dnsAddressLabel = createLabel("Адрес DNS:")
 	app.dnsAddress = createEdit(defaultDNSURL)
 	app.dnsApplyButton = createButton("Применить DNS", idApplyDNS, false)
+	app.dnsOnlyButton = createButton("Только DNS", idDNSOnly, false)
 	dns, dnsErr := loadDNSConfig()
 	app.dnsLoadError = dnsErr
 	if dnsErr != nil {
@@ -795,6 +826,19 @@ func main() {
 		}
 		return
 	}
+	// A second GUI must not overwrite the original DNS recovery snapshot
+	// while another instance is changing network settings.
+	lock, err := win.CreateMutex(nil, false, win.StringToUTF16Ptr(`Global\WARPClientGUI`))
+	if errors.Is(err, win.ERROR_ALREADY_EXISTS) {
+		win.CloseHandle(lock)
+		messageBox(0, "Окно WARP уже открыто. Используйте запущенный экземпляр клиента.", "WARP", mbOK|mbIconInformation)
+		return
+	}
+	if err != nil {
+		messageBox(0, "Не удалось защитить настройки от одновременного изменения:\r\n"+err.Error(), "WARP", mbOK|mbIconError)
+		return
+	}
+	defer win.CloseHandle(lock)
 	if err := createApplicationWindow(); err != nil {
 		messageBox(0, err.Error(), "WARP", mbOK|mbIconError)
 		return

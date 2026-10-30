@@ -29,6 +29,7 @@ const (
 
 type dnsConfig struct {
 	Enabled      bool     `json:"enabled"`
+	DNSOnly      bool     `json:"dns_only,omitempty"`
 	Type         string   `json:"type"`
 	Address      string   `json:"address"`
 	BootstrapIPs []string `json:"bootstrap_ips,omitempty"`
@@ -196,6 +197,9 @@ func dnsServersForConfig(config dnsConfig) string {
 }
 
 func dnsEndpoint(config dnsConfig) (string, string, error) {
+	if config.Type == "udp" {
+		return parseDNSHostPort(config.Address, "53", "udp://")
+	}
 	if config.Type == "doh" {
 		u, err := parseDoHURL(config.Address)
 		if err != nil {
@@ -216,6 +220,8 @@ type dnsProxy struct {
 	dotPool     chan net.Conn
 	udp         *net.UDPConn
 	tcp         net.Listener
+	udp6        *net.UDPConn
+	tcp6        net.Listener
 	ctx         context.Context
 	cancel      context.CancelFunc
 	semaphore   chan struct{}
@@ -231,8 +237,12 @@ func newDNSProxy(config dnsConfig) (*dnsProxy, error) {
 	if err := validateDNSConfig(config); err != nil {
 		return nil, err
 	}
-	if !config.Enabled || config.Type != "doh" && config.Type != "dot" {
+	if !config.Enabled || config.Type != "doh" && config.Type != "dot" && !(config.DNSOnly && config.Type == "udp") {
 		return nil, errors.New("локальная служба нужна только для DoH или DoT")
+	}
+	if config.Type == "udp" {
+		host, _, _ := dnsEndpoint(config)
+		config.BootstrapIPs = []string{host}
 	}
 	if len(config.BootstrapIPs) == 0 {
 		return nil, errors.New("адрес DNS-сервера не сохранён; примените настройки DNS ещё раз")
@@ -304,8 +314,26 @@ func (p *dnsProxy) listenAt(address string) error {
 		return fmt.Errorf("не удалось открыть локальный DNS TCP: %w", err)
 	}
 	p.workers.Add(2)
-	go p.serveUDP()
-	go p.serveTCP()
+	go p.serveUDP(p.udp)
+	go p.serveTCP(p.tcp)
+	if p.config.DNSOnly {
+		_, port, _ := net.SplitHostPort(p.udp.LocalAddr().String())
+		addr6, err := net.ResolveUDPAddr("udp6", net.JoinHostPort("::1", port))
+		if err != nil {
+			return err
+		}
+		p.udp6, err = net.ListenUDP("udp6", addr6)
+		if err != nil {
+			return fmt.Errorf("не удалось открыть локальный IPv6 DNS UDP: %w", err)
+		}
+		p.tcp6, err = net.Listen("tcp6", addr6.String())
+		if err != nil {
+			return fmt.Errorf("не удалось открыть локальный IPv6 DNS TCP: %w", err)
+		}
+		p.workers.Add(2)
+		go p.serveUDP(p.udp6)
+		go p.serveTCP(p.tcp6)
+	}
 	return nil
 }
 
@@ -317,6 +345,12 @@ func (p *dnsProxy) Close() {
 		}
 		if p.tcp != nil {
 			p.tcp.Close()
+		}
+		if p.udp6 != nil {
+			p.udp6.Close()
+		}
+		if p.tcp6 != nil {
+			p.tcp6.Close()
 		}
 		p.mu.Lock()
 		p.closing = true
@@ -392,11 +426,11 @@ func (p *dnsProxy) dialContext(ctx context.Context, network, address string) (ne
 	return nil, lastError
 }
 
-func (p *dnsProxy) serveUDP() {
+func (p *dnsProxy) serveUDP(listener *net.UDPConn) {
 	defer p.workers.Done()
 	buffer := make([]byte, maxDNSMessage)
 	for {
-		n, sender, err := p.udp.ReadFromUDP(buffer)
+		n, sender, err := listener.ReadFromUDP(buffer)
 		if err != nil {
 			return
 		}
@@ -407,7 +441,7 @@ func (p *dnsProxy) serveUDP() {
 		select {
 		case p.semaphore <- struct{}{}:
 		default:
-			p.udp.WriteToUDP(dnsErrorResponse(query, false), sender)
+			listener.WriteToUDP(dnsErrorResponse(query, false), sender)
 			continue
 		}
 		p.workers.Add(1)
@@ -420,15 +454,15 @@ func (p *dnsProxy) serveUDP() {
 			} else if len(response) > dnsUDPSize(query) {
 				response = dnsErrorResponse(query, true)
 			}
-			p.udp.WriteToUDP(response, sender)
+			listener.WriteToUDP(response, sender)
 		}()
 	}
 }
 
-func (p *dnsProxy) serveTCP() {
+func (p *dnsProxy) serveTCP(listener net.Listener) {
 	defer p.workers.Done()
 	for {
-		conn, err := p.tcp.Accept()
+		conn, err := listener.Accept()
 		if err != nil {
 			return
 		}
@@ -474,6 +508,8 @@ func (p *dnsProxy) forward(ctx context.Context, query []byte) ([]byte, error) {
 	var err error
 	if p.config.Type == "doh" {
 		response, err = p.forwardDoH(ctx, query)
+	} else if p.config.Type == "udp" {
+		response, err = p.forwardUDP(ctx, query)
 	} else {
 		response, err = p.forwardDoT(ctx, query)
 	}
@@ -484,6 +520,42 @@ func (p *dnsProxy) forward(ctx context.Context, query []byte) ([]byte, error) {
 		return nil, err
 	}
 	return response, nil
+}
+
+func (p *dnsProxy) forwardUDP(ctx context.Context, query []byte) ([]byte, error) {
+	conn, err := p.dialContext(ctx, "udp", net.JoinHostPort(p.host, p.port))
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	deadline, _ := ctx.Deadline()
+	conn.SetDeadline(deadline)
+	if _, err = conn.Write(query); err != nil {
+		return nil, err
+	}
+	buffer := make([]byte, maxDNSMessage)
+	n, err := conn.Read(buffer)
+	if err != nil {
+		return nil, err
+	}
+	response := buffer[:n]
+	if err = validateDNSResponse(query, response); err != nil {
+		return nil, err
+	}
+	if response[2]&2 == 0 {
+		return response, nil
+	}
+	// Retry truncated upstream UDP replies over TCP.
+	tcp, err := p.dialContext(ctx, "tcp", net.JoinHostPort(p.host, p.port))
+	if err != nil {
+		return nil, err
+	}
+	defer tcp.Close()
+	tcp.SetDeadline(deadline)
+	if err = writeDNSFrame(tcp, query); err != nil {
+		return nil, err
+	}
+	return readDNSFrame(tcp)
 }
 
 func (p *dnsProxy) forwardDoH(ctx context.Context, query []byte) ([]byte, error) {
@@ -679,7 +751,7 @@ func dnsUDPSize(query []byte) int {
 }
 
 func verifyDNSServer(ctx context.Context, config dnsConfig) error {
-	if !config.Enabled || config.Type == "udp" {
+	if !config.Enabled || config.Type == "udp" && !config.DNSOnly {
 		return validateDNSConfig(config)
 	}
 	p, err := newDNSProxy(config)

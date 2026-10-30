@@ -8,6 +8,7 @@ if ($errors.Count) { throw ($errors | Out-String) }
 foreach ($definition in $ast.FindAll({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] }, $false)) {
     Invoke-Expression $definition.Extent.Text
 }
+. (Join-Path $PSScriptRoot 'dns_only.ps1')
 function Assert([bool]$Value, [string]$Message) { if (-not $Value) { throw $Message } }
 $example = "[Interface]`r`nPrivateKey = test`r`n  DNS = 8.8.8.8`r`n[Peer]`r`nEndpoint = 1.2.3.4:2408`r`n"
 $expected = "[Interface]`r`nDNS = 127.0.0.1`r`nPrivateKey = test`r`n[Peer]`r`nEndpoint = 1.2.3.4:2408`r`n"

@@ -6,6 +6,7 @@ $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'warp.ps1'), [ref]$tokens, [ref]$errors)
 if ($errors.Count) { throw ($errors | Out-String) }
 foreach ($definition in $ast.FindAll({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] }, $false)) { Invoke-Expression $definition.Extent.Text }
+. (Join-Path $PSScriptRoot 'dns_only.ps1')
 function Assert([bool]$Value, [string]$Message) { if (-not $Value) { throw $Message } }
 $fixture = Join-Path ([IO.Path]::GetTempPath()) ('warp-uninstall-test-' + [Guid]::NewGuid().ToString('N'))
 $null = New-Item -ItemType Directory -Path $fixture

@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('Install', 'Connect', 'Disconnect', 'Reconnect', 'Rescan', 'ApplyDNS', 'Status', 'Uninstall')]
+    [ValidateSet('Install', 'Connect', 'Disconnect', 'Reconnect', 'Rescan', 'ApplyDNS', 'Status', 'Uninstall', 'PrepareDNSOnly', 'ApplyDNSOnly', 'StopDNSOnly')]
     [string]$Action = 'Install',
 
     [switch]$AcceptCloudflareTerms,
@@ -14,11 +14,12 @@ param(
     [string]$Sni = 'ozon.ru',
     [string]$RequiredCountries = '',
     [string]$RequiredNodes = '',
-    [string]$ExcludedCountries = 'RU',
-    [string]$ExcludedNodes = 'DME',
+    [string]$ExcludedCountries = '',
+    [string]$ExcludedNodes = '',
     [string]$DnsServers = '8.8.8.8, 8.8.4.4',
 
-    [string]$BundledHelperHash = ''
+    [string]$BundledHelperHash = '',
+    [switch]$ResumePreviousWarp
 )
 
 Set-StrictMode -Version Latest
@@ -37,6 +38,7 @@ $TunnelName = 'warp'
 $ServiceName = 'AmneziaWGTunnel$warp'
 $DnsServiceName = 'WarpExternalDNS'
 $DnsConfigPath = Join-Path $StateDirectory 'dns.json'
+. (Join-Path $PSScriptRoot 'dns_only.ps1')
 
 function Test-Administrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -590,6 +592,7 @@ function Remove-WarpCaches {
 }
 
 function Remove-WarpCompletely {
+    Restore-DNSOnly
     Remove-ExternalDNS
     if (Test-Path -LiteralPath $AmneziaPath) { Remove-TunnelService }
     Remove-AmneziaWG
@@ -610,6 +613,9 @@ if ($Action -ne 'Status') {
 }
 
 switch ($Action) {
+    'PrepareDNSOnly' { Prepare-DNSOnly }
+    'ApplyDNSOnly' { Enable-DNSOnly }
+    'StopDNSOnly' { Restore-DNSOnly -ResumeWarp:$ResumePreviousWarp }
     'Install' {
         Protect-StateDirectory
         Install-AmneziaWG $architecture $hashes
@@ -658,6 +664,15 @@ switch ($Action) {
         Set-TunnelDNS
     }
     'Status' {
+        if (Test-Path -LiteralPath (Get-DNSOnlySnapshotPath)) {
+            Write-Host 'Режим «Только DNS»: включён. WARP отключён.'
+            if (Test-Path -LiteralPath $DnsConfigPath) {
+                $dns = Get-Content -LiteralPath $DnsConfigPath -Raw | ConvertFrom-Json
+                Write-Host "DNS: $($dns.type) $($dns.address)"
+            }
+            Get-Service -Name $DnsServiceName -ErrorAction SilentlyContinue | Select-Object Name, Status, StartType
+            break
+        }
         $service = Get-TunnelService
         if ($null -eq $service) {
             Write-Host 'WARP не установлен.'

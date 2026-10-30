@@ -33,6 +33,108 @@ func testDNSAnswer(query []byte) []byte {
 	return append(response, 0xc0, 12, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 192, 0, 2, 1)
 }
 
+func TestStandaloneUDPAndDualStackListeners(t *testing.T) {
+	config := dnsConfig{Enabled: true, DNSOnly: true, Type: "udp", Address: "8.8.8.8"}
+	ordinary := config
+	ordinary.DNSOnly = false
+	if _, err := newDNSProxy(ordinary); err == nil {
+		t.Fatal("ordinary UDP DNS must use the native tunnel settings")
+	}
+	upstream, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer upstream.Close()
+	tcpUpstream, err := net.Listen("tcp4", upstream.LocalAddr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tcpUpstream.Close()
+	var truncate atomic.Bool
+	var tcpQueries atomic.Int32
+	go func() {
+		buffer := make([]byte, maxDNSMessage)
+		for {
+			n, address, err := upstream.ReadFrom(buffer)
+			if err != nil {
+				return
+			}
+			response := testDNSAnswer(buffer[:n])
+			if truncate.Load() {
+				response = dnsErrorResponse(buffer[:n], true)
+			}
+			upstream.WriteTo(response, address)
+		}
+	}()
+	go func() {
+		for {
+			conn, err := tcpUpstream.Accept()
+			if err != nil {
+				return
+			}
+			conn.SetDeadline(time.Now().Add(3 * time.Second))
+			query, err := readDNSFrame(conn)
+			if err == nil {
+				tcpQueries.Add(1)
+				writeDNSFrame(conn, testDNSAnswer(query))
+			}
+			conn.Close()
+		}
+	}()
+	proxy, err := newDNSProxy(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer proxy.Close()
+	proxy.host, proxy.port, _ = net.SplitHostPort(upstream.LocalAddr().String())
+	proxy.config.BootstrapIPs = []string{proxy.host}
+	if err = proxy.listenAt("127.0.0.1:0"); err != nil {
+		t.Fatal(err)
+	}
+	for _, address := range []string{proxy.udp.LocalAddr().String(), proxy.udp6.LocalAddr().String()} {
+		for _, network := range []string{"udp", "tcp"} {
+			for _, truncated := range []bool{false, true} {
+				truncate.Store(truncated)
+				conn, err := net.DialTimeout(network, address, 3*time.Second)
+				if err != nil {
+					t.Fatal(err)
+				}
+				conn.SetDeadline(time.Now().Add(3 * time.Second))
+				query := testDNSQuery()
+				var response []byte
+				if network == "tcp" {
+					err = writeDNSFrame(conn, query)
+					if err == nil {
+						response, err = readDNSFrame(conn)
+					}
+				} else {
+					_, err = conn.Write(query)
+					if err == nil {
+						buffer := make([]byte, 512)
+						var n int
+						n, err = conn.Read(buffer)
+						response = buffer[:n]
+					}
+				}
+				conn.Close()
+				if err != nil || !bytes.Equal(response, testDNSAnswer(query)) {
+					t.Fatalf("%s %s truncated=%v: response=%x err=%v", network, address, truncated, response, err)
+				}
+			}
+		}
+	}
+	if tcpQueries.Load() != 4 {
+		t.Fatalf("upstream TCP retries = %d, want 4", tcpQueries.Load())
+	}
+	proxy.Close()
+	for _, address := range []string{proxy.tcp.Addr().String(), proxy.tcp6.Addr().String()} {
+		if conn, err := net.DialTimeout("tcp", address, time.Second); err == nil {
+			conn.Close()
+			t.Fatal("DNS listener remains after Close")
+		}
+	}
+}
+
 func testTLSCertificate(t *testing.T) (tls.Certificate, *x509.CertPool) {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)

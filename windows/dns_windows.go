@@ -92,17 +92,21 @@ func retryStoppedExecutable(operation func() error) error {
 }
 
 func writeDNSConfig(config dnsConfig) error {
+	return writeProtectedJSON(dnsConfigPath(), config)
+}
+
+func writeProtectedJSON(path string, value any) error {
 	if err := os.MkdirAll(stateDirectory(), 0700); err != nil {
 		return err
 	}
 	if err := protectPath(stateDirectory(), true); err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(config, "", "  ")
+	data, err := json.MarshalIndent(value, "", "  ")
 	if err != nil {
 		return err
 	}
-	temporary := dnsConfigPath() + ".new"
+	temporary := path + ".new"
 	defer os.Remove(temporary)
 	if err = os.WriteFile(temporary, data, 0600); err != nil {
 		return err
@@ -110,7 +114,7 @@ func writeDNSConfig(config dnsConfig) error {
 	if err = protectPath(temporary, false); err != nil {
 		return err
 	}
-	return replaceFile(temporary, dnsConfigPath())
+	return replaceFile(temporary, path)
 }
 
 func copyCurrentExecutable() error {
@@ -242,7 +246,7 @@ func syncDNSService(config dnsConfig, running bool) error {
 			return err
 		}
 	}
-	proxy := config.Enabled && config.Type != "udp"
+	proxy := config.Enabled && (config.Type != "udp" || config.DNSOnly)
 	if !proxy {
 		if service != nil {
 			if err = service.Delete(); err != nil {
@@ -263,16 +267,30 @@ func syncDNSService(config dnsConfig, running bool) error {
 	if err = copyCurrentExecutable(); err != nil {
 		return err
 	}
+	dependencies := []string{tunnelServiceName}
+	if config.DNSOnly {
+		dependencies = []string{"Tcpip"}
+	}
 	if service == nil {
 		service, err = manager.CreateService(dnsServiceName, dnsServicePath(), mgr.Config{
-			DisplayName: "WARP DNS", Description: "Encrypted DNS for WARP",
+			DisplayName: "WARP DNS", Description: "DNS proxy for WARP or standalone DNS",
 			StartType: win.SERVICE_AUTO_START, ErrorControl: win.SERVICE_ERROR_NORMAL,
-			Dependencies: []string{tunnelServiceName},
+			Dependencies: dependencies,
 		})
 		if err != nil {
 			return err
 		}
 		defer service.Close()
+	} else {
+		settings, err := service.Config()
+		if err != nil {
+			return err
+		}
+		settings.Dependencies = dependencies
+		settings.StartType = win.SERVICE_AUTO_START
+		if err = service.UpdateConfig(settings); err != nil {
+			return err
+		}
 	}
 	if err = service.SetRecoveryActions([]mgr.RecoveryAction{{Type: mgr.ServiceRestart, Delay: 5 * time.Second}}, 86400); err != nil {
 		return err
@@ -307,7 +325,7 @@ type dnsServiceHandler struct{}
 func (*dnsServiceHandler) Execute(_ []string, requests <-chan svc.ChangeRequest, statuses chan<- svc.Status) (bool, uint32) {
 	statuses <- svc.Status{State: svc.StartPending, WaitHint: 10000}
 	config, err := loadDNSConfig()
-	if err == nil && (!config.Enabled || config.Type == "udp") {
+	if err == nil && (!config.Enabled || config.Type == "udp" && !config.DNSOnly) {
 		err = errors.New("DNS-служба не включена")
 	}
 	if err != nil {
@@ -361,6 +379,26 @@ func configuredDNS(data []byte) string {
 }
 
 func runClientAction(action string, arguments []string, config dnsConfig) (string, error) {
+	if action == "DNSOnly" {
+		return startDNSOnly(config)
+	}
+	if action == "StopDNSOnly" {
+		return stopDNSOnly(false)
+	}
+	active := dnsOnlyActive()
+	if active && action == "ApplyDNS" {
+		if !config.Enabled {
+			return stopDNSOnly(false)
+		}
+		return startDNSOnly(config)
+	}
+	if active && (action == "Connect" || action == "Reconnect" || action == "Install" || action == "Rescan" || action == "Disconnect") {
+		output, err := stopDNSOnly(false)
+		if err != nil || action == "Disconnect" {
+			return output, err
+		}
+	}
+	config.DNSOnly = false
 	if action == "Connect" || action == "Reconnect" {
 		if _, err := os.Stat(filepath.Join(stateDirectory(), "warp.conf")); errors.Is(err, os.ErrNotExist) {
 			return runPowerShell(arguments)
