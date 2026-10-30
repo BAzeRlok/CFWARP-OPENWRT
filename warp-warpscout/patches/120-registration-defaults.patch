@@ -1,0 +1,12 @@
+--- a/mini_flags.go
++++ b/mini_flags.go
+@@ -113,6 +113,9 @@ func setupRegisterFlags(fs *flag.FlagSet, o *options) {
+ 	addAWGFlags(fs, o)
+ 	o.proto = protoAWG
+ 	o.perSubnet = registerSample
++	// Registration also passes common scan validation and may need a tunnel.
++	// Without this default every fresh registration exits before contacting CF.
++	o.tunnelParallel = defaultTunnelJobs
+ }
+ 
+ func addAWGFlags(fs *flag.FlagSet, o *options) {

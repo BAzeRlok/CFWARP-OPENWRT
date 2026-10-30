@@ -155,6 +155,10 @@ full-tunnel-службу через официальный AmneziaWG for Windows
 Windows on ARM используется
 `warp-windows-arm64.exe`.
 
+Компонент регистрации и поиска серверов встроен в Windows EXE. Отдельный
+`warp-windows-helper` скачивать не требуется. При установке он извлекается в
+защищённый каталог `%ProgramData%\WARP` и проверяется перед запуском.
+
 Подробности интерфейса: [windows/README.md](windows/README.md).
 
 ## Удаление

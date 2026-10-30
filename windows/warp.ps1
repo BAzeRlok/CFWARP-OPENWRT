@@ -16,7 +16,9 @@ param(
     [string]$RequiredNodes = '',
     [string]$ExcludedCountries = 'RU',
     [string]$ExcludedNodes = 'DME',
-    [string]$DnsServers = '8.8.8.8, 8.8.4.4'
+    [string]$DnsServers = '8.8.8.8, 8.8.4.4',
+
+    [string]$BundledHelperHash = ''
 )
 
 Set-StrictMode -Version Latest
@@ -24,9 +26,6 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 
-$ReleaseTag = 'v4.2.0'
-$HelperVersion = '0.16.0-r2'
-$Repository = 'BAzeRlok/CFWARP-OPENWRT'
 $OfficialVersion = '3.1.0'
 $StateDirectory = Join-Path $env:ProgramData 'WARP'
 $HelperPath = Join-Path $StateDirectory 'warp-helper.exe'
@@ -63,12 +62,10 @@ function Get-ClientArchitecture {
 function Get-ExpectedHashes([string]$Architecture) {
     if ($Architecture -eq 'amd64') {
         return @{
-            Helper = 'd0007949f2f9d36c711ad6be075ea71cf5c19a6c48d14a8f57501617542ae506'
             Msi = 'a1b48ea8699cd347832a3691d832004574ef8ad65bcf887611ac8acb99b7de8b'
         }
     }
     return @{
-        Helper = '5656a034d0b7352ef5a8148cb65e29fe8f964b03eae2f91f18dcf933fb439a1c'
         Msi = '3aec023884944890fac151f9cd4be3e92d39f9987c49da248837529c006ea2aa'
     }
 }
@@ -125,19 +122,13 @@ function Install-AmneziaWG([string]$Architecture, [hashtable]$Hashes) {
     }
 }
 
-function Install-Helper([string]$Architecture, [hashtable]$Hashes) {
-    $name = "warp-windows-helper-$HelperVersion-$Architecture.exe"
-    $uri = "https://github.com/$Repository/releases/download/$ReleaseTag/$name"
-    $needsDownload = $true
-    if (Test-Path -LiteralPath $HelperPath) {
-        $currentHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $HelperPath).Hash.ToLowerInvariant()
-        $needsDownload = $currentHash -ne $Hashes.Helper.ToLowerInvariant()
+function Install-Helper {
+    if ($BundledHelperHash -notmatch '^[a-fA-F0-9]{64}$' -or -not (Test-Path -LiteralPath $HelperPath)) {
+        throw 'Встроенный компонент регистрации не подготовлен. Запустите установку из warp-windows.exe.'
     }
-    if ($needsDownload) {
-        $temporary = "$HelperPath.download"
-        Write-Host 'Скачивание проверенного WARP helper...'
-        Get-VerifiedFile $uri $temporary $Hashes.Helper
-        Move-Item -LiteralPath $temporary -Destination $HelperPath -Force
+    $currentHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $HelperPath).Hash.ToLowerInvariant()
+    if ($currentHash -ne $BundledHelperHash.ToLowerInvariant()) {
+        throw 'Не совпала SHA-256 встроенного компонента регистрации WARP.'
     }
     Protect-StateFile $HelperPath
 }
@@ -145,7 +136,7 @@ function Install-Helper([string]$Architecture, [hashtable]$Hashes) {
 function Invoke-Helper([string[]]$Arguments) {
     & $HelperPath @Arguments
     if ($LASTEXITCODE -ne 0) {
-        throw "WARP helper завершился с кодом $LASTEXITCODE."
+        throw "Компонент регистрации и поиска WARP завершился с кодом $LASTEXITCODE."
     }
 }
 
@@ -342,7 +333,7 @@ function New-WarpConfiguration {
     Write-Host 'Поиск минимальной потери пакетов и лучшей задержки...'
     Invoke-Helper $arguments.ToArray()
     if (-not (Test-Path -LiteralPath $CandidatePath)) {
-        throw 'Helper не создал конфигурацию WARP.'
+        throw 'Компонент поиска не создал конфигурацию WARP.'
     }
 
     $config = Get-Content -LiteralPath $CandidatePath -Raw
@@ -484,7 +475,7 @@ switch ($Action) {
     'Install' {
         Protect-StateDirectory
         Install-AmneziaWG $architecture $hashes
-        Install-Helper $architecture $hashes
+        Install-Helper
         Ensure-Account
         New-WarpConfiguration
         Install-TunnelConfiguration
@@ -493,7 +484,7 @@ switch ($Action) {
     'Rescan' {
         Protect-StateDirectory
         Install-AmneziaWG $architecture $hashes
-        Install-Helper $architecture $hashes
+        Install-Helper
         Ensure-Account
         New-WarpConfiguration
         Install-TunnelConfiguration

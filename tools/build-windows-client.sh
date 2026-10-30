@@ -4,8 +4,31 @@ set -eu
 
 root_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 output_dir="$root_dir/dist"
+asset_dir="$root_dir/windows/assets"
+helper_version=$(sed -n 's/^PKG_VERSION:=//p' "$root_dir/warp-warpscout/Makefile")-r$(sed -n 's/^PKG_RELEASE:=//p' "$root_dir/warp-warpscout/Makefile")
 
-mkdir -p "$output_dir"
+mkdir -p "$output_dir" "$asset_dir"
+
+# Check both inputs before updating either embedded payload or client.
+for architecture in amd64 arm64; do
+	helper="$output_dir/warp-windows-helper-$helper_version-$architecture.exe"
+	if [ ! -s "$helper" ]; then
+		printf 'Missing Windows helper: %s\nBuild both helpers first.\n' "$helper" >&2
+		exit 1
+	fi
+	case "$architecture:$(LC_ALL=C file -b "$helper")" in
+		amd64:PE32+*x86-64*|arm64:PE32+*ARM64*) ;;
+		*) printf 'Wrong executable architecture: %s\n' "$helper" >&2; exit 1 ;;
+	esac
+done
+
+for architecture in amd64 arm64; do
+	helper="$output_dir/warp-windows-helper-$helper_version-$architecture.exe"
+	asset="$asset_dir/warp-helper-$architecture.exe.gz"
+	gzip -n -9 -c "$helper" > "$asset.new"
+	gzip -t "$asset.new"
+	mv "$asset.new" "$asset"
+done
 
 (
 	cd "$root_dir/windows"

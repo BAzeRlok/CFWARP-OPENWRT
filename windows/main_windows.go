@@ -21,7 +21,7 @@ import (
 )
 
 const (
-	version = "4.2.0-dns1"
+	version = "4.2.0-r2"
 
 	wsOverlappedWindow = 0x00CF0000
 	wsChild            = 0x40000000
@@ -570,6 +570,17 @@ func completeAction() {
 }
 
 func runPowerShell(arguments []string) (string, error) {
+	for index, argument := range arguments {
+		if argument == "-Action" && index+1 < len(arguments) &&
+			(arguments[index+1] == "Install" || arguments[index+1] == "Rescan") {
+			hash, err := installBundledHelper()
+			if err != nil {
+				return "", fmt.Errorf("подготовка встроенного компонента WARP: %w", err)
+			}
+			arguments = append(arguments, "-BundledHelperHash", hash)
+			break
+		}
+	}
 	temporaryDirectory, err := os.MkdirTemp("", "warp-windows-")
 	if err != nil {
 		return "", err

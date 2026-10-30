@@ -125,6 +125,19 @@ try {
     Install-TunnelConfiguration
     Assert ([IO.File]::ReadAllText($ConfigPath) -ceq $expected) 'Successful install lost new config'
     Assert ($script:serviceStates['Tunnel'] -eq [ServiceProcess.ServiceControllerStatus]::Running) 'Successful install did not start tunnel'
-    'PowerShell DNS and installation rollback tests OK'
+
+    $HelperPath = Join-Path $StateDirectory 'warp-helper.exe'
+    [IO.File]::WriteAllText($HelperPath, 'embedded helper test')
+    $BundledHelperHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $HelperPath).Hash
+    Install-Helper
+    [IO.File]::WriteAllText($HelperPath, 'changed after extraction')
+    $rejected = $false
+    try { Install-Helper } catch { $rejected = $_.ToString() -match 'SHA-256' }
+    Assert $rejected 'Modified bundled helper must not be executed'
+    $BundledHelperHash = ''
+    $rejected = $false
+    try { Install-Helper } catch { $rejected = $true }
+    Assert $rejected 'Missing bundled helper checksum must be rejected'
+    'PowerShell DNS, installation rollback and embedded helper tests OK'
 }
 finally { Remove-Item -LiteralPath $StateDirectory -Recurse -Force }
