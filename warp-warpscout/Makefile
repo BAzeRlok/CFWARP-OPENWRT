@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=warp-warpscout
 PKG_VERSION:=0.16.0
-PKG_RELEASE:=3
+PKG_RELEASE:=4
 
 PKG_SOURCE:=warpscout-$(PKG_VERSION).tar.gz
 PKG_SOURCE_URL:=https://codeload.github.com/vernette/warpscout/tar.gz/refs/tags/v$(PKG_VERSION)?

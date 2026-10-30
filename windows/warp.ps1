@@ -150,7 +150,7 @@ function Ensure-Account {
     Write-Host 'Регистрация отдельного WARP-профиля для этого компьютера...'
     Invoke-Helper @(
         'register', '--plain', '--relay', 'none', '--account', $AccountPath,
-        '--gen-i1', 'quic', '--i1-sni', $Sni
+        '--registration-sni', $Sni
     )
     Protect-StateFile $AccountPath
 }

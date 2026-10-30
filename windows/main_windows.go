@@ -21,7 +21,7 @@ import (
 )
 
 const (
-	version = "4.2.0-r2"
+	version = "4.2.0-r3"
 
 	wsOverlappedWindow = 0x00CF0000
 	wsChild            = 0x40000000

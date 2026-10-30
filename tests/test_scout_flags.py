@@ -92,6 +92,95 @@ func main() {
 }
 '''
 
+REGISTRATION_TESTS = r'''
+package main
+
+import (
+    "context"
+    "crypto/x509"
+    "errors"
+    "io"
+    "net/http"
+    "net/url"
+    "strings"
+    "testing"
+)
+
+const regBaseURL = "https://api.example.invalid/reg"
+type account struct { ID string }
+var mint func(context.Context, *http.Client, account) (account, error)
+func mintAccount(ctx context.Context, c *http.Client, a account) (account, error) { return mint(ctx, c, a) }
+type roundTrip func(*http.Request) (*http.Response, error)
+func (f roundTrip) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestNetworkFailureSelectsAnotherPath(t *testing.T) {
+    for _, failureAt := range []string{"probe", "registration"} {
+        t.Run(failureAt, func(t *testing.T) {
+            selected, closed, minted := 0, 0, 0
+            next := func(context.Context) (registrationPath, error) {
+                selected++
+                index := selected
+                return registrationPath{name:"endpoint", close:func(){closed++}, client:&http.Client{
+                    Transport:roundTrip(func(r *http.Request)(*http.Response,error){
+                        if r.Method != "GET" || r.URL.String()!=regBaseURL { t.Fatal("probe must not register a device") }
+                        if failureAt=="probe" && index==1 { return nil, context.DeadlineExceeded }
+                        return &http.Response{StatusCode:405, Body:io.NopCloser(strings.NewReader("method not allowed"))},nil
+                    }),
+                }},nil
+            }
+            mint = func(context.Context,*http.Client,account)(account,error){
+                minted++
+                if failureAt=="registration" && minted==1 { return account{}, &url.Error{Op:"Post",URL:regBaseURL,Err:context.DeadlineExceeded} }
+                return account{ID:"success"},nil
+            }
+            got,err := registerFromPaths(context.Background(), next, account{})
+            if err!=nil || got.ID!="success" || selected!=2 || closed!=2 { t.Fatalf("result=%+v err=%v selected=%d closed=%d",got,err,selected,closed) }
+            if failureAt=="probe" && minted!=1 { t.Fatal("failed HTTPS probe must not create account") }
+        })
+    }
+}
+
+func TestRegistrationRetryIsBounded(t *testing.T) {
+    selected,closed:=0,0
+    next:=func(context.Context)(registrationPath,error){
+        selected++
+        return registrationPath{name:"endpoint",close:func(){closed++},client:&http.Client{Transport:roundTrip(func(*http.Request)(*http.Response,error){return nil,context.DeadlineExceeded})}},nil
+    }
+    mint=func(context.Context,*http.Client,account)(account,error){t.Fatal("probe failed: registration must not be sent");return account{},nil}
+    _,err:=registerFromPaths(context.Background(),next,account{})
+    if err==nil || selected!=registrationMaxPaths || closed!=selected { t.Fatalf("err=%v selected=%d closed=%d",err,selected,closed) }
+}
+
+func TestRefusalAndPartialAccountAreNotRetried(t *testing.T) {
+    for _,id:=range []string{"","already-created"}{
+        selected,closed:=0,0
+        next:=func(context.Context)(registrationPath,error){
+            selected++
+            return registrationPath{name:"endpoint",close:func(){closed++},client:&http.Client{Transport:roundTrip(func(*http.Request)(*http.Response,error){return &http.Response{StatusCode:405,Body:io.NopCloser(strings.NewReader(""))},nil})}},nil
+        }
+        mint=func(context.Context,*http.Client,account)(account,error){
+            if id!="" {return account{ID:id},context.DeadlineExceeded}
+            return account{},errors.New("API refused registration")
+        }
+        got,err:=registerFromPaths(context.Background(),next,account{})
+        if err==nil || got.ID!=id || selected!=1 || closed!=1 {t.Fatalf("id=%q result=%+v err=%v selected=%d closed=%d",id,got,err,selected,closed)}
+    }
+}
+
+func TestCancellationAndEmptyDiscovery(t *testing.T) {
+    ctx,cancel:=context.WithCancel(context.Background());cancel()
+    _,err:=registerFromPaths(ctx,func(context.Context)(registrationPath,error){t.Fatal("cancelled discovery ran");return registrationPath{},nil},account{})
+    if !errors.Is(err,context.Canceled){t.Fatal(err)}
+    _,err=registerFromPaths(context.Background(),func(context.Context)(registrationPath,error){return registrationPath{},io.EOF},account{})
+    if !errors.Is(err,errRegistrationNoEndpoint)||!registrationNetworkError(err){t.Fatal(err)}
+}
+
+func TestCertificateErrorsAreNotRetried(t *testing.T) {
+    err:=&url.Error{Op:"Get",URL:regBaseURL,Err:x509.UnknownAuthorityError{}}
+    if registrationNetworkError(err){t.Fatal("certificate validation failure classified as retryable network error")}
+}
+'''
+
 
 class ScoutFlagTests(unittest.TestCase):
     @classmethod
@@ -149,6 +238,11 @@ class ScoutFlagTests(unittest.TestCase):
                 self.assertEqual(parsed["account"], "/not-created/account.json")
                 self.assertEqual(parsed["interface"], "wan")
 
+    def test_automatic_registration_masking_host(self):
+        result = self.invoke("register", "--registration-sni", "ozon.ru")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(json.loads(result.stdout)["generated_i1"])
+
     def test_scan_defaults_remain_valid(self):
         result = self.invoke("scan")
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -163,6 +257,28 @@ class ScoutFlagTests(unittest.TestCase):
                     result = self.invoke("scan", option, count)
                     self.assertEqual(result.returncode, 2)
                     self.assertIn("-sample and -tunnel-jobs must be at least 1", result.stderr)
+
+    def test_registration_path_failover(self):
+        directory = pathlib.Path(self.directory.name)
+        patch = (PATCHES / "130-registration-paths.patch").read_text()
+        section = re.search(
+            r"^--- /dev/null\n\+\+\+ b/register_paths\.go\n.*?(?=^--- |\Z)",
+            patch, flags=re.M | re.S,
+        )
+        self.assertIsNotNone(section)
+        subprocess.run(
+            ["patch", "--batch", "--fuzz=0", "-p1"], input=section.group(),
+            text=True, cwd=directory, check=True, capture_output=True,
+        )
+        (directory / "register_paths_test.go").write_text(REGISTRATION_TESTS)
+        env = os.environ.copy()
+        env.update({"GO111MODULE": "off", "GOTOOLCHAIN": "local", "GOPROXY": "off", "GOSUMDB": "off", "GOCACHE": str(directory / "go-cache")})
+        env.pop("GOOS", None)
+        env.pop("GOARCH", None)
+        subprocess.run(
+            ["go", "test", "register_paths.go", "register_paths_test.go"],
+            cwd=directory, env=env, check=True, timeout=120,
+        )
 
 
 if __name__ == "__main__":

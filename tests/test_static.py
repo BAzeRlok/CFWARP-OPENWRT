@@ -252,7 +252,7 @@ PersistentKeepalive = 25
         self.assertIn("GOMEMLIMIT=48MiB", init)
         self.assertIn("WG_PROCESS_FOREGROUND=1", init)
         self.assertIn("PKG_VERSION:=0.16.0", scout_package)
-        self.assertIn("PKG_RELEASE:=3", scout_package)
+        self.assertIn("PKG_RELEASE:=4", scout_package)
         self.assertIn("PKG_HASH:=c21c777239856401f6529e4e2503d9f6ebd9071f78988fe86e35aaefc65a1c20", scout_package)
         self.assertIn("return mintWGAccount(ctx, client, existing)", scout_patch)
         self.assertIn("//go:build warpscout_full", scout_patch)

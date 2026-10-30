@@ -1,0 +1,284 @@
+--- a/register.go
++++ b/register.go
+@@ -161,7 +161,7 @@
+ 	patchURL := fmt.Sprintf("%s/%s", regBaseURL, a.ID)
+ 	if _, err := doJSON(ctx, client, http.MethodPatch, patchURL, a.Token,
+ 		map[string]bool{"warp_enabled": true}); err != nil {
+-		return account{}, fmt.Errorf("PATCH /reg/%s: %w", a.ID, err)
++		return a, fmt.Errorf("PATCH /reg activation: %w", err)
+ 	}
+ 	return a, nil
+ }
+@@ -287,19 +287,16 @@
+ }
+ 
+ func tunnelClient(tnet *netstack.Net) (*http.Client, error) {
+-	// The netstack tunnel only has a v4 address (warpAddress), so the API must be
+-	// dialed over IPv4 - a v6 target picked from LookupHost would blackhole.
+-	ip, err := resolveIPv4(apiHost)
+-	if err != nil {
+-		return nil, fmt.Errorf("resolve %s: %w", apiHost, err)
+-	}
+-	target := net.JoinHostPort(ip, "443")
++	// Resolve through the temporary tunnel, not the possibly filtered host DNS.
++	// Bootstrap IPv6 belongs to another device, so its data path is unusable.
+ 	return &http.Client{
+ 		Timeout: registerTimeout,
+ 		Transport: &http.Transport{
+-			DisableKeepAlives: true,
+-			DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+-				return tnet.DialContext(ctx, "tcp", target)
++			ForceAttemptHTTP2:     true,
++			TLSHandshakeTimeout:   6 * time.Second,
++			ResponseHeaderTimeout: 8 * time.Second,
++			DialContext: func(ctx context.Context, _, addr string) (net.Conn, error) {
++				return tnet.DialContext(ctx, "tcp4", addr)
+ 			},
+ 		},
+ 	}, nil
+@@ -309,13 +306,21 @@
+ 
+ const tunnelDiscoverySample = 64
+ 
+-const tunnelDiscoveryBudget = 40 * time.Second
++const tunnelDiscoveryBudget = 45 * time.Second
++const registrationBudget = 150 * time.Second
+ 
+ func obtainAccount(ctx context.Context, o options, ips []netip.Addr, timeout time.Duration, existing account) (account, error) {
++	ctx, cancel := context.WithTimeout(ctx, registrationBudget)
++	defer cancel()
+ 	fmt.Fprintln(os.Stderr, errPal.dim("Checking Cloudflare API availability..."))
+ 	direct := &http.Client{Timeout: registerTimeout, Transport: regTransport()}
++	defer direct.CloseIdleConnections()
+ 	if apiReachable(direct) {
+-		return mintAccount(ctx, direct, existing)
++		a, err := mintAccount(ctx, direct, existing)
++		if err == nil || a.ID != "" || !registrationNetworkError(err) {
++			return a, err
++		}
++		fmt.Fprintln(os.Stderr, "Direct API registration failed; checking temporary tunnels")
+ 	}
+ 
+ 	fmt.Fprintf(os.Stderr, "\n%s\n\n", errPal.fail("API unreachable directly"))
+@@ -327,6 +332,9 @@
+ 	var lastErr error
+ 	p := protoRun{kindAWG, protoAWG}
+ 	for _, c := range regI1Candidates(p, o, origI1, origLabel) {
++		if ctx.Err() != nil {
++			break
++		}
+ 		// newTunnel bakes the globals into the UAPI config, so set them first.
+ 		awgI1, genI1Label = c.chain, c.label
+ 		label := p.name
+@@ -342,10 +350,19 @@
+ 			reportRegI1(origI1)
+ 			return a, nil
+ 		}
++		if a.ID != "" || !registrationNetworkError(err) {
++			return a, err
++		}
+ 		fmt.Fprintln(os.Stderr, errPal.fail(fmt.Sprintf("  %s: %v", label, err)))
+ 		lastErr = err
+ 	}
+ 	awgI1, genI1Label = origI1, origLabel
++	if lastErr == nil {
++		lastErr = ctx.Err()
++	}
++	if lastErr == nil {
++		lastErr = errRegistrationNoEndpoint
++	}
+ 	return account{}, lastErr
+ }
+ 
+@@ -357,8 +374,15 @@
+ 	if o.i1Explicit {
+ 		return []i1Candidate{{curChain, curLabel}}
+ 	}
+-	cands := []i1Candidate{{i1Default, ""}}
++	cands := []i1Candidate{}
++	if chain, label, err := genI1("quic", o.i1Host); err == nil {
++		cands = append(cands, i1Candidate{chain, label})
++	}
++	cands = append(cands, i1Candidate{i1Default, ""})
+ 	for _, p := range i1Profiles() {
++		if p == "quic" {
++			continue
++		}
+ 		if chain, label, err := genI1(p, o.i1Host); err == nil {
+ 			cands = append(cands, i1Candidate{chain, label})
+ 		}
+@@ -380,32 +404,40 @@
+ 	return nil
+ }
+ 
+-// The handshake is the only reachability test that survives the DPI which
+-// forced the tunnel fallback in the first place.
++// A handshake is not enough: bootstrap peers may accept it while HTTPS fails.
+ func registerViaTunnel(ctx context.Context, run protoRun, ips []netip.Addr, timeout time.Duration, onProbe func(probed int), existing account) (account, error) {
+-	tn, err := newTunnel(run)
+-	if err != nil {
+-		return account{}, err
+-	}
+-	defer tn.Close()
+-
+ 	ctx, cancel := context.WithTimeout(ctx, tunnelDiscoveryBudget)
+ 	defer cancel()
+-	for i, ip := range ips {
+-		if ctx.Err() != nil {
+-			break
+-		}
+-		if onProbe != nil {
+-			onProbe(i + 1)
++	index := 0
++	next := func(ctx context.Context) (registrationPath, error) {
++		tn, err := newTunnel(run)
++		if err != nil {
++			return registrationPath{}, err
+ 		}
+-		if !tunnelConnect(ctx, tn, ip, timeout) {
+-			continue
++		for index < len(ips) && ctx.Err() == nil {
++			ip := ips[index]
++			index++
++			if onProbe != nil {
++				onProbe(index)
++			}
++			for _, port := range tn.ports() {
++				endpoint := net.JoinHostPort(ip.String(), fmt.Sprint(port))
++				if !tn.handshake(ctx, endpoint, timeout) {
++					continue
++				}
++				client, err := tunnelClient(tn.stack().tnet)
++				if err != nil {
++					tn.Close()
++					return registrationPath{}, err
++				}
++				return registrationPath{name: endpoint, client: client, close: tn.Close}, nil
++			}
+ 		}
+-		client, err := tunnelClient(tn.stack().tnet)
+-		if err != nil {
+-			return account{}, err
++		tn.Close()
++		if ctx.Err() != nil {
++			return registrationPath{}, ctx.Err()
+ 		}
+-		return mintAccount(ctx, client, existing)
++		return registrationPath{}, io.EOF
+ 	}
+-	return account{}, fmt.Errorf("no reachable endpoint")
++	return registerFromPaths(ctx, next, existing)
+ }
+--- a/mini_flags.go
++++ b/mini_flags.go
+@@ -113,6 +113,7 @@
+ 	fs.BoolVar(&o.plain, "plain", false, "")
+ 	addAWGFlags(fs, o)
+ 	o.proto = protoAWG
++	fs.StringVar(&o.i1Host, "registration-sni", "", "host for automatic registration obfuscation")
+ 	o.perSubnet = registerSample
+ 	// Registration also passes common scan validation and may need a tunnel.
+ 	// Without this default every fresh registration exits before contacting CF.
+--- /dev/null
++++ b/register_paths.go
+@@ -0,0 +1,100 @@
++package main
++
++import (
++	"context"
++	"crypto/tls"
++	"crypto/x509"
++	"errors"
++	"fmt"
++	"io"
++	"net"
++	"net/http"
++	"os"
++	"time"
++)
++
++const registrationMaxPaths = 4
++const registrationProbeTimeout = 6 * time.Second
++
++var errRegistrationNoEndpoint = errors.New("no reachable endpoint")
++
++type registrationPath struct {
++	name   string
++	client *http.Client
++	close  func()
++}
++
++// Retry network failures only. An API refusal or a bad certificate needs to be
++// reported, rather than masked by repeated account creation.
++func registrationNetworkError(err error) bool {
++	var certificate *tls.CertificateVerificationError
++	var unknown x509.UnknownAuthorityError
++	var hostname x509.HostnameError
++	var invalid x509.CertificateInvalidError
++	if errors.As(err, &certificate) || errors.As(err, &unknown) || errors.As(err, &hostname) || errors.As(err, &invalid) {
++		return false
++	}
++	var network net.Error
++	return errors.As(err, &network) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, errRegistrationNoEndpoint)
++}
++
++func registrationAPIProbe(ctx context.Context, client *http.Client) error {
++	ctx, cancel := context.WithTimeout(ctx, registrationProbeTimeout)
++	defer cancel()
++	// GET never creates an account. Any HTTP response proves verified HTTPS.
++	request, err := http.NewRequestWithContext(ctx, http.MethodGet, regBaseURL, nil)
++	if err != nil {
++		return err
++	}
++	response, err := client.Do(request)
++	if err != nil {
++		return err
++	}
++	defer response.Body.Close()
++	n, err := io.Copy(io.Discard, io.LimitReader(response.Body, (64<<10)+1))
++	if err != nil {
++		return err
++	}
++	if n > 64<<10 {
++		return errors.New("API probe response too large")
++	}
++	return nil
++}
++
++func registerFromPaths(ctx context.Context, next func(context.Context) (registrationPath, error), existing account) (account, error) {
++	var lastError error
++	for attempt := 0; attempt < registrationMaxPaths && ctx.Err() == nil; attempt++ {
++		path, err := next(ctx)
++		if err != nil {
++			if !errors.Is(err, io.EOF) {
++				lastError = err
++			}
++			break
++		}
++		fmt.Fprintf(os.Stderr, "  checking API HTTPS via %s\n", path.name)
++		err = registrationAPIProbe(ctx, path.client)
++		var result account
++		if err == nil {
++			result, err = mintAccount(ctx, path.client, existing)
++		}
++		path.client.CloseIdleConnections()
++		path.close()
++		if err == nil {
++			return result, nil
++		}
++		lastError = fmt.Errorf("API via %s: %w", path.name, err)
++		// Once POST succeeded, do not create another account just because its
++		// activation request failed. Preserve the partial result for the caller.
++		if result.ID != "" || !registrationNetworkError(err) {
++			return result, lastError
++		}
++		fmt.Fprintf(os.Stderr, "  API via %s failed; trying another endpoint\n", path.name)
++	}
++	if lastError == nil {
++		lastError = ctx.Err()
++	}
++	if lastError == nil {
++		lastError = errRegistrationNoEndpoint
++	}
++	return account{}, lastError
++}
