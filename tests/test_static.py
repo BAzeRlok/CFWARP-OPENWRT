@@ -49,8 +49,6 @@ class PackageTests(unittest.TestCase):
             ROOT / "root/etc/init.d/warp-watchdog",
             ROOT / "install.sh",
             ROOT / "tools/test-direct-regions.sh",
-            ROOT / "tools/build-windows-client.sh",
-            ROOT / "tools/build-windows-helper.sh",
             ROOT / "tests/router-integration.sh",
             ROOT / "tests/run.sh",
             ROOT / "tests/test_watchdog.sh",
@@ -352,11 +350,9 @@ PersistentKeepalive = 25
         self.assertIn('RELEASE_TAG="v4.2.0"', installer)
         self.assertIn('uci set warp.main.sni="$MASKING_SNI"', installer)
 
-    def test_latency_watchdog_defaults_and_windows_full_tunnel(self):
+    def test_latency_watchdog_defaults(self):
         config = (ROOT / "root/etc/config/warp").read_text(encoding="utf-8")
         frontend = FRONTEND.read_text(encoding="utf-8")
-        windows = (ROOT / "windows/warp.ps1").read_text(encoding="utf-8")
-        launcher = (ROOT / "windows/main_windows.go").read_text(encoding="utf-8")
         for setting in [
             "option latency_watchdog '1'",
             "option latency_threshold '250'",
@@ -366,36 +362,6 @@ PersistentKeepalive = 25
         self.assertIn("'latency_watchdog'", frontend)
         self.assertIn("'latency_threshold'", frontend)
         self.assertIn("'scan_sample'", frontend)
-        self.assertIn("0\\.0\\.0\\.0/0,\\s*::/0", windows)
-        self.assertIn("AmneziaWGTunnel$warp", windows)
-        self.assertIn("Get-AuthenticodeSignature", windows)
-        self.assertIn("'*S-1-5-18:F'", windows)
-        self.assertNotIn("__HELPER_", windows)
-        self.assertIn("//go:embed warp.ps1", launcher)
-        self.assertIn('NewProc("ShellExecuteW")', launcher)
-        self.assertIn('NewProc("CreateWindowExW")', launcher)
-        self.assertIn('createButton("Лучший endpoint"', launcher)
-        self.assertIn('createButton("Подключить"', launcher)
-        self.assertIn('createButton("Отключить"', launcher)
-        self.assertIn("[Console]::OutputEncoding", windows)
-        build_script = (ROOT / "tools/build-windows-client.sh").read_text(encoding="utf-8")
-        self.assertIn("GOOS=windows GOARCH=amd64", build_script)
-        self.assertIn("GOOS=windows GOARCH=arm64", build_script)
-        self.assertIn("-H=windowsgui", build_script)
-        checksums = dict(
-            reversed(line.split())
-            for line in (ROOT / "release/SHA256SUMS").read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        )
-        self.assertNotIn("warp-windows-helper-", windows)
-        self.assertNotIn("$Hashes.Helper", windows)
-        self.assertIn("BundledHelperHash", windows)
-        self.assertIn("installBundledHelper()", launcher)
-        for arch in ("amd64", "arm64"):
-            embedded = (ROOT / f"windows/helper_windows_{arch}.go").read_text(encoding="utf-8")
-            self.assertIn(f"//go:embed assets/warp-helper-{arch}.exe.gz", embedded)
-        self.assertIn("warp-windows.exe", checksums)
-        self.assertIn("warp-windows-arm64.exe", checksums)
 
     def test_region_probe_prepares_apk_destination(self):
         probe = (ROOT / "tools/test-direct-regions.sh").read_text(encoding="utf-8")

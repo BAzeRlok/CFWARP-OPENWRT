@@ -141,29 +141,6 @@ cat /etc/warp/last_optimization 2>/dev/null
 logread -e warp-watchdog
 ```
 
-## Windows
-
-Клиент Windows поставляется единым EXE, регистрирует отдельный WARP-профиль,
-выбирает AWG endpoint по потере пакетов и задержке и устанавливает
-full-tunnel-службу через официальный AmneziaWG for Windows. IPv4, IPv6 и DNS
-по умолчанию направляются через WARP.
-
-Для обычной Windows x64 скачайте `warp-windows.exe` из
-[последнего релиза](https://github.com/BAzeRlok/CFWARP-OPENWRT/releases/latest)
-и запустите двойным щелчком. EXE сам запросит права администратора и согласие с
-условиями Cloudflare, после чего откроет графическое окно управления. Для
-Windows on ARM используется
-`warp-windows-arm64.exe`.
-
-Компонент регистрации и поиска серверов встроен в Windows EXE. Отдельный
-`warp-windows-helper` скачивать не требуется. При установке он извлекается в
-защищённый каталог `%ProgramData%\WARP` и проверяется перед запуском.
-
-Подробности интерфейса: [windows/README.md](windows/README.md).
-
-Кнопка **Только DNS** включает UDP/DoT/DoH без регистрации и подключения WARP.
-При отключении восстанавливаются прежние системные DNS-настройки.
-
 ## Удаление
 
 ```sh
