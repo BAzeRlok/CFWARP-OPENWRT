@@ -21,7 +21,7 @@ import (
 )
 
 const (
-	version = "4.2.0-r3"
+	version = "4.2.0-r4"
 
 	wsOverlappedWindow = 0x00CF0000
 	wsChild            = 0x40000000
@@ -501,7 +501,7 @@ func startAction(action string) {
 	if (action == "Install" || action == "Rescan") && !confirmTerms() {
 		return
 	}
-	if action == "Uninstall" && messageBox(app.window, "Удалить службу WARP, профиль и локальные ключи?", "Удаление WARP", mbYesNo|mbIconWarning) != idYes {
+	if action == "Uninstall" && messageBox(app.window, "Полностью удалить WARP и AmneziaWG, все их туннели, профили, ключи, настройки и кэши?\r\n\r\nДругие профили AmneziaWG также будут удалены. После завершения окно закроется и этот EXE будет удалён.", "Полное удаление WARP", mbYesNo|mbIconWarning) != idYes {
 		return
 	}
 
@@ -554,8 +554,13 @@ func completeAction() {
 		return
 	}
 	if result.action == "Uninstall" {
-		app.dnsLoadError = nil
-		setDNSControls(defaultDNSConfig())
+		setBusy(false, "Удаление завершено")
+		messageBox(app.window, output+"\r\n\r\nОкно закроется. EXE клиента будет удалён после выхода.", "WARP удалён", mbOK|mbIconInformation)
+		if err := scheduleLauncherRemoval(); err != nil {
+			messageBox(app.window, "Системные компоненты удалены. Не удалось автоматически удалить EXE:\r\n"+err.Error()+"\r\nУдалите скачанный файл вручную после закрытия окна.", "Удаление EXE", mbOK|mbIconWarning)
+		}
+		procDestroyWindow.Call(app.window)
+		return
 	} else if result.action == "ApplyDNS" || result.action == "Install" || result.action == "Rescan" {
 		config, err := loadDNSConfig()
 		app.dnsLoadError = err

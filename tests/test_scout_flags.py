@@ -97,6 +97,7 @@ package main
 
 import (
     "context"
+    "crypto/tls"
     "crypto/x509"
     "errors"
     "io"
@@ -179,6 +180,11 @@ func TestCertificateErrorsAreNotRetried(t *testing.T) {
     err:=&url.Error{Op:"Get",URL:regBaseURL,Err:x509.UnknownAuthorityError{}}
     if registrationNetworkError(err){t.Fatal("certificate validation failure classified as retryable network error")}
 }
+
+func TestRegistrationTLSCompatibilityKeepsVerification(t *testing.T) {
+    config:=registrationTLSConfig()
+    if config.MinVersion!=tls.VersionTLS12 || config.MaxVersion!=tls.VersionTLS12 || config.InsecureSkipVerify {t.Fatal("registration TLS policy changed")}
+}
 '''
 
 
@@ -260,16 +266,17 @@ class ScoutFlagTests(unittest.TestCase):
 
     def test_registration_path_failover(self):
         directory = pathlib.Path(self.directory.name)
-        patch = (PATCHES / "130-registration-paths.patch").read_text()
-        section = re.search(
-            r"^--- /dev/null\n\+\+\+ b/register_paths\.go\n.*?(?=^--- |\Z)",
-            patch, flags=re.M | re.S,
-        )
-        self.assertIsNotNone(section)
-        subprocess.run(
-            ["patch", "--batch", "--fuzz=0", "-p1"], input=section.group(),
-            text=True, cwd=directory, check=True, capture_output=True,
-        )
+        for source_patch in sorted(PATCHES.glob("*.patch")):
+            sections = re.findall(
+                r"^--- (?:a/register_paths\.go|/dev/null)\n\+\+\+ b/register_paths\.go\n.*?(?=^diff --git |^--- |\Z)",
+                source_patch.read_text(), flags=re.M | re.S,
+            )
+            for section in sections:
+                subprocess.run(
+                    ["patch", "--batch", "--fuzz=0", "-p1"], input=section,
+                    text=True, cwd=directory, check=True, capture_output=True,
+                )
+        self.assertTrue((directory / "register_paths.go").is_file())
         (directory / "register_paths_test.go").write_text(REGISTRATION_TESTS)
         env = os.environ.copy()
         env.update({"GO111MODULE": "off", "GOTOOLCHAIN": "local", "GOPROXY": "off", "GOSUMDB": "off", "GOCACHE": str(directory / "go-cache")})

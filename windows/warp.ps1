@@ -464,6 +464,144 @@ function Get-TunnelService {
     return Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
 }
 
+function Get-AmneziaProducts {
+    # Reading uninstall entries does not trigger MSI repair (Win32_Product does).
+    foreach ($base in @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall', 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall')) {
+        if (-not (Test-Path -LiteralPath $base)) { continue }
+        foreach ($key in Get-ChildItem -LiteralPath $base) {
+            $product = Get-ItemProperty -LiteralPath $key.PSPath -ErrorAction SilentlyContinue
+            if ($null -eq $product -or -not $product.PSObject.Properties['DisplayName'] -or $product.DisplayName -ne 'AmneziaWG') { continue }
+            if (-not $product.PSObject.Properties['Publisher'] -or $product.Publisher -ne 'Amnezia') { continue }
+            if ($key.PSChildName -notmatch '^\{[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\}$') { continue }
+            $key.PSChildName
+        }
+    }
+}
+
+function Remove-AmneziaProduct([string]$ProductCode) {
+    if ($ProductCode -notmatch '^\{[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\}$') { throw 'Некорректный идентификатор MSI AmneziaWG.' }
+    $process = Start-Process msiexec.exe -ArgumentList @('/x', $ProductCode, '/qn', '/norestart') -Wait -PassThru
+    if ($process.ExitCode -eq 3010) { $script:UninstallNeedsReboot = $true }
+    elseif ($process.ExitCode -notin @(0, 1605, 1614)) { throw "Удаление AmneziaWG завершилось с кодом $($process.ExitCode). Повторите удаление после завершения других MSI-операций." }
+}
+
+function Remove-AmneziaService([string]$Name) {
+    if ($Name -ne 'AmneziaWGManager' -and $Name -notmatch '^AmneziaWGTunnel\$[^\\/]+$') { throw 'Недопустимая служба для удаления.' }
+    $service = Get-Service -Name $Name -ErrorAction SilentlyContinue
+    if ($null -eq $service) { return }
+    try {
+        if ($service.Status -ne [ServiceProcess.ServiceControllerStatus]::Stopped) {
+            Stop-Service -Name $Name -Force
+            $service.WaitForStatus([ServiceProcess.ServiceControllerStatus]::Stopped, [TimeSpan]::FromSeconds(30))
+        }
+    }
+    finally { $service.Dispose() }
+    & sc.exe delete $Name | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Не удалось удалить службу $Name" }
+}
+
+function Remove-AmneziaWG {
+    $script:UninstallNeedsReboot = $false
+    $products = @(Get-AmneziaProducts | Select-Object -Unique)
+    foreach ($code in $products) {
+        Write-Host 'Удаление официального AmneziaWG и его драйвера...'
+        Remove-AmneziaProduct $code
+    }
+    # Also handle a portable/partially installed backend, without touching
+    # ordinary WireGuard services or shared Windows driver stores.
+    $services = @(Get-Service -Name 'AmneziaWGManager', 'AmneziaWGTunnel$*' -ErrorAction SilentlyContinue)
+    foreach ($service in $services) {
+        $name = $service.Name
+        $service.Dispose()
+        Remove-AmneziaService $name
+    }
+    $backendDirectory = [IO.Path]::GetDirectoryName($AmneziaPath)
+    foreach ($process in @(Get-Process -Name 'amneziawg', 'awg' -ErrorAction SilentlyContinue)) {
+        if ($process.Path -and [string]::Equals([IO.Path]::GetDirectoryName($process.Path), $backendDirectory, [StringComparison]::OrdinalIgnoreCase)) {
+            Stop-Process -Id $process.Id -Force
+        }
+    }
+    if ($products.Count -eq 0 -and (Test-Path -LiteralPath $AmneziaPath)) {
+        & $AmneziaPath /removedriver | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw 'Не удалось удалить драйвер AmneziaWG.' }
+    }
+}
+
+function Get-WarpCleanupRoots {
+    $roots = @($StateDirectory, [IO.Path]::GetDirectoryName($AmneziaPath))
+    foreach ($base in @($env:LOCALAPPDATA, $env:APPDATA)) {
+        if ([string]::IsNullOrWhiteSpace($base)) { continue }
+        $roots += (Join-Path $base 'WARP')
+        $roots += (Join-Path $base 'AmneziaWG')
+    }
+    foreach ($root in $roots) {
+        if ([string]::IsNullOrWhiteSpace($root)) { continue }
+        [IO.Path]::GetFullPath($root).TrimEnd([IO.Path]::DirectorySeparatorChar)
+    }
+}
+
+function Get-WarpTemporaryDirectory { return [IO.Path]::GetTempPath() }
+
+function Remove-WarpTreeEntry([string]$Path) {
+    try { $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop }
+    catch [System.Management.Automation.ItemNotFoundException] { return }
+    # Never recurse through a junction/symlink into unrelated user data.
+    if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        if ($item.PSIsContainer) { [IO.Directory]::Delete($item.FullName) }
+        else { [IO.File]::Delete($item.FullName) }
+        return
+    }
+    if ($item.PSIsContainer) {
+        foreach ($child in Get-ChildItem -LiteralPath $item.FullName -Force) { Remove-WarpTreeEntry $child.FullName }
+    }
+    Remove-Item -LiteralPath $item.FullName -Force
+}
+
+function Remove-WarpOwnedTree([string]$Path) {
+    $full = [IO.Path]::GetFullPath($Path).TrimEnd([IO.Path]::DirectorySeparatorChar)
+    $allowed = $false
+    foreach ($root in Get-WarpCleanupRoots) {
+        if ([string]::Equals($full, $root, [StringComparison]::OrdinalIgnoreCase)) { $allowed = $true }
+    }
+    $temporary = (Get-WarpTemporaryDirectory).TrimEnd([IO.Path]::DirectorySeparatorChar)
+    if ([string]::Equals([IO.Path]::GetDirectoryName($full), $temporary, [StringComparison]::OrdinalIgnoreCase) -and [IO.Path]::GetFileName($full) -match '^warp-windows-[0-9]+$') { $allowed = $true }
+    if (-not $allowed) { throw "Отказ от очистки постороннего каталога: $full" }
+    for ($attempt = 0; $attempt -lt 20; $attempt++) {
+        try { Remove-WarpTreeEntry $full; return }
+        catch {
+            if ($attempt -eq 19) { throw }
+            Start-Sleep -Milliseconds 200
+        }
+    }
+}
+
+function Remove-WarpCaches {
+    $temporary = Get-WarpTemporaryDirectory
+    $activeScript = ''
+    if (-not [string]::IsNullOrWhiteSpace($PSScriptRoot)) { $activeScript = [IO.Path]::GetFullPath($PSScriptRoot).TrimEnd([IO.Path]::DirectorySeparatorChar) }
+    foreach ($entry in Get-ChildItem -LiteralPath $temporary -Force) {
+        if ($entry.PSIsContainer -and $entry.Name -match '^warp-windows-[0-9]+$') {
+            if (-not [string]::Equals($entry.FullName, $activeScript, [StringComparison]::OrdinalIgnoreCase)) { Remove-WarpOwnedTree $entry.FullName }
+        }
+        elseif (-not $entry.PSIsContainer -and $entry.Name -match '^amneziawg-(amd64|arm64)-[0-9]+(\.[0-9]+){1,3}\.msi$') {
+            Remove-Item -LiteralPath $entry.FullName -Force
+        }
+    }
+}
+
+function Remove-WarpCompletely {
+    Remove-ExternalDNS
+    if (Test-Path -LiteralPath $AmneziaPath) { Remove-TunnelService }
+    Remove-AmneziaWG
+    foreach ($root in Get-WarpCleanupRoots | Select-Object -Unique) { Remove-WarpOwnedTree $root }
+    foreach ($key in @('HKLM:\SOFTWARE\AmneziaWG', 'HKLM:\SOFTWARE\WOW6432Node\AmneziaWG', 'HKCU:\SOFTWARE\AmneziaWG')) {
+        if (Test-Path -LiteralPath $key) { Remove-Item -LiteralPath $key -Recurse -Force }
+    }
+    Remove-WarpCaches
+    Write-Host 'WARP, AmneziaWG, их службы, профили, ключи, настройки и кэши удалены.'
+    if ($script:UninstallNeedsReboot) { Write-Host 'Windows требует перезагрузку для завершения удаления драйвера. Автоматическая перезагрузка не выполняется.' }
+}
+
 $architecture = Get-ClientArchitecture
 $hashes = Get-ExpectedHashes $architecture
 
@@ -537,13 +675,6 @@ switch ($Action) {
         }
     }
     'Uninstall' {
-        Remove-ExternalDNS
-        if (Test-Path -LiteralPath $AmneziaPath) {
-            Remove-TunnelService
-        }
-        if (Test-Path -LiteralPath $StateDirectory) {
-            Remove-Item -LiteralPath $StateDirectory -Recurse -Force
-        }
-        Write-Host 'Профиль WARP и локальные ключи удалены. AmneziaWG оставлен установленным.'
+        Remove-WarpCompletely
     }
 }

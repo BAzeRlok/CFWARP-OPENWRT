@@ -252,7 +252,7 @@ PersistentKeepalive = 25
         self.assertIn("GOMEMLIMIT=48MiB", init)
         self.assertIn("WG_PROCESS_FOREGROUND=1", init)
         self.assertIn("PKG_VERSION:=0.16.0", scout_package)
-        self.assertIn("PKG_RELEASE:=4", scout_package)
+        self.assertIn("PKG_RELEASE:=5", scout_package)
         self.assertIn("PKG_HASH:=c21c777239856401f6529e4e2503d9f6ebd9071f78988fe86e35aaefc65a1c20", scout_package)
         self.assertIn("return mintWGAccount(ctx, client, existing)", scout_patch)
         self.assertIn("//go:build warpscout_full", scout_patch)
@@ -342,7 +342,7 @@ PersistentKeepalive = 25
     def test_installer_selects_supported_arm64_packages(self):
         installer = (ROOT / "install.sh").read_text(encoding="utf-8")
         self.assertIn("aarch64|aarch64_cortex-a53)", installer)
-        self.assertIn('LUCI_PACKAGE="luci-app-warp-4.2.0-r2.apk"', installer)
+        self.assertIn('LUCI_PACKAGE="luci-app-warp-4.2.0-r3.apk"', installer)
         self.assertIn('AWG_PACKAGE="warp-awg-3.1.20260828-r3-$ARCH.apk"', installer)
         self.assertNotIn('SCOUT_PACKAGE=', installer)
         self.assertIn("apk del warp-warpscout", installer)
@@ -412,9 +412,9 @@ PersistentKeepalive = 25
             reversed(line.split()) for line in manifest.splitlines() if line.strip()
         )
         expected = {
-            "aarch64": checksums["warp-warpscout-0.16.0-r3-aarch64.apk"],
+            "aarch64": checksums["warp-warpscout-0.16.0-r5-aarch64.apk"],
             "aarch64_cortex-a53": checksums[
-                "warp-warpscout-0.16.0-r3-aarch64_cortex-a53.apk"
+                "warp-warpscout-0.16.0-r5-aarch64_cortex-a53.apk"
             ],
         }
         self.assertIn(f"SCOUT_SHA_AARCH64='{expected['aarch64']}'", manager)
